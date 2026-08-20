@@ -4,14 +4,18 @@
 		clearSession,
 		getStoredUser,
 		getToken,
+		patchStoredUser,
 		listTeachers,
 		createTeacher,
 		updateTeacher,
 		deleteTeacher,
+		activateTeacher,
 		listRooms,
 		createRoom,
 		updateRoom,
 		deleteRoom,
+		getRoomQR,
+		refreshRoomQR,
 		listSchedules,
 		createSchedule,
 		updateSchedule,
@@ -23,6 +27,7 @@
 		rejectLeave,
 		getMonthlyReport,
 		getHistoryLog,
+		updateMyPhoto,
 		type Teacher,
 		type Room,
 		type Schedule,
@@ -71,6 +76,74 @@
 		currentUser = null;
 		isLoggedIn = false;
 		loginInput = { nip: '', password: '' };
+	}
+
+	// ------------------------------------------------------------------
+	// 1b. Foto Profil (PUT /api/profile/photo) — dipakai admin & guru
+	// ------------------------------------------------------------------
+	let showModalFoto = $state(false);
+	let fotoPreview = $state<string | null>(null); // data URI, buat preview sebelum disimpan
+	let fotoError = $state('');
+	let fotoLoading = $state(false);
+
+	function openModalFoto() {
+		fotoPreview = null;
+		fotoError = '';
+		showModalFoto = true;
+	}
+
+	function fileToDataURL(file: File): Promise<string> {
+		return new Promise((resolve, reject) => {
+			const reader = new FileReader();
+			reader.onload = () => resolve(reader.result as string);
+			reader.onerror = () => reject(new Error('Gagal membaca file'));
+			reader.readAsDataURL(file);
+		});
+	}
+
+	async function handlePickFoto(e: Event) {
+		fotoError = '';
+		const input = e.target as HTMLInputElement;
+		const file = input.files?.[0];
+		if (!file) return;
+
+		if (!['image/jpeg', 'image/jpg', 'image/png', 'image/webp'].includes(file.type)) {
+			fotoError = 'Format harus JPEG, PNG, atau WEBP';
+			return;
+		}
+		if (file.size > 2 * 1024 * 1024) {
+			fotoError = 'Ukuran file maksimal 2MB';
+			return;
+		}
+
+		try {
+			fotoPreview = await fileToDataURL(file);
+		} catch (err) {
+			fotoError = err instanceof Error ? err.message : 'Gagal membaca file gambar';
+		}
+	}
+
+	async function handleSaveFoto() {
+		if (!fotoPreview) {
+			fotoError = 'Pilih foto terlebih dahulu';
+			return;
+		}
+		fotoLoading = true;
+		fotoError = '';
+		try {
+			const res = await updateMyPhoto(fotoPreview);
+			currentUser = patchStoredUser({ photo_url: res.photo_url }) ?? currentUser;
+			showModalFoto = false;
+			fotoPreview = null;
+			// Kalau admin, refresh Data Master Guru supaya foto barunya ikut tampil di tabel.
+			if (currentUser?.role === 'admin') {
+				await loadTeachers();
+			}
+		} catch (err) {
+			fotoError = err instanceof Error ? err.message : 'Gagal menyimpan foto profil';
+		} finally {
+			fotoLoading = false;
+		}
 	}
 
 	// ------------------------------------------------------------------
@@ -152,12 +225,22 @@
 	}
 
 	async function handleDeleteGuru(t: Teacher) {
-		if (!confirm(`Nonaktifkan guru "${t.name}"?`)) return;
+		if (!confirm(`Nonaktifkan guru "${t.name}"? Guru yang nonaktif tidak bisa login/presensi.`)) return;
 		try {
 			await deleteTeacher(t.id);
 			await loadTeachers();
 		} catch (err) {
 			globalError = err instanceof Error ? err.message : 'Gagal menonaktifkan guru';
+		}
+	}
+
+	async function handleActivateGuru(t: Teacher) {
+		if (!confirm(`Aktifkan kembali guru "${t.name}"?`)) return;
+		try {
+			await activateTeacher(t.id);
+			await loadTeachers();
+		} catch (err) {
+			globalError = err instanceof Error ? err.message : 'Gagal mengaktifkan guru';
 		}
 	}
 
@@ -171,6 +254,17 @@
 	let ruanganFormError = $state('');
 	let showModalQR = $state(false);
 	let selectedRoom = $state<Room | null>(null);
+
+	// --- QR "live" (auto-refresh) di dalam modal, agar QR yang difoto/
+	// discreenshot dari luar kelas cepat kedaluwarsa dan tidak bisa dipakai
+	// untuk scan-in palsu dari rumah. ---
+	let qrLoading = $state(false);
+	let qrError = $state('');
+	let qrCurrentString = $state('');
+	let qrExpiresIn = $state(0); // detik tersisa sebelum QR berganti
+	let qrRotationSecondsVal = $state(20);
+	let qrPollTimer: ReturnType<typeof setInterval> | null = null;
+	let qrCountdownTimer: ReturnType<typeof setInterval> | null = null;
 
 	async function loadRooms() {
 		roomsLoading = true;
@@ -200,9 +294,66 @@
 		}
 	}
 
-	function openQRModal(room: Room) {
+	function stopQRTimers() {
+		if (qrPollTimer) clearInterval(qrPollTimer);
+		if (qrCountdownTimer) clearInterval(qrCountdownTimer);
+		qrPollTimer = null;
+		qrCountdownTimer = null;
+	}
+
+	async function loadLiveQR(roomId: number, opts: { silent?: boolean } = {}) {
+		if (!opts.silent) qrLoading = true;
+		try {
+			const data = await getRoomQR(roomId);
+			qrCurrentString = data.qr_string;
+			qrExpiresIn = data.expires_in_seconds;
+			qrRotationSecondsVal = data.rotation_seconds;
+			qrError = '';
+		} catch (err) {
+			qrError = err instanceof Error ? err.message : 'Gagal memuat QR';
+		} finally {
+			qrLoading = false;
+		}
+	}
+
+	async function handleRefreshQRNow() {
+		if (!selectedRoom) return;
+		qrLoading = true;
+		try {
+			const data = await refreshRoomQR(selectedRoom.id);
+			qrCurrentString = data.qr_string;
+			qrExpiresIn = data.expires_in_seconds;
+			qrRotationSecondsVal = data.rotation_seconds;
+			qrError = '';
+		} catch (err) {
+			qrError = err instanceof Error ? err.message : 'Gagal me-refresh QR';
+		} finally {
+			qrLoading = false;
+		}
+	}
+
+	async function openQRModal(room: Room) {
 		selectedRoom = room;
 		showModalQR = true;
+		qrError = '';
+		qrCurrentString = '';
+		stopQRTimers();
+
+		await loadLiveQR(room.id);
+
+		// Poll ke server tiap 3 detik supaya QR selalu sinkron dengan yang
+		// tervalidasi di backend (backend yang jadi sumber kebenaran waktu,
+		// bukan jam device, supaya tidak bisa dicurangi).
+		qrPollTimer = setInterval(() => loadLiveQR(room.id, { silent: true }), 3000);
+		// Hitung mundur visual per detik, disinkronkan ulang tiap kali poll berhasil.
+		qrCountdownTimer = setInterval(() => {
+			qrExpiresIn = qrExpiresIn > 0 ? qrExpiresIn - 1 : 0;
+		}, 1000);
+	}
+
+	function closeQRModal() {
+		showModalQR = false;
+		stopQRTimers();
 	}
 
 	let showModalEditRuangan = $state(false);
@@ -367,6 +518,13 @@
 	let newCuti = $state({ start_date: '', end_date: '', leave_type: 'sakit', reason: '' });
 	let cutiFormError = $state('');
 
+	// --- Modal alasan penolakan (admin wajib isi saat menolak cuti) ---
+	let showModalTolakCuti = $state(false);
+	let tolakCutiTarget = $state<Leave | null>(null);
+	let tolakCutiReason = $state('');
+	let tolakCutiFormError = $state('');
+	let tolakCutiLoading = $state(false);
+
 	async function loadLeaves() {
 		leavesLoading = true;
 		try {
@@ -406,12 +564,32 @@
 		}
 	}
 
-	async function handleReject(id: number) {
+	// Membuka modal untuk minta alasan penolakan dulu, bukan langsung menolak.
+	function openTolakCuti(c: Leave) {
+		tolakCutiTarget = c;
+		tolakCutiReason = '';
+		tolakCutiFormError = '';
+		showModalTolakCuti = true;
+	}
+
+	async function handleReject(e: Event) {
+		e.preventDefault();
+		tolakCutiFormError = '';
+		if (!tolakCutiTarget) return;
+		if (!tolakCutiReason.trim()) {
+			tolakCutiFormError = 'Alasan penolakan wajib diisi';
+			return;
+		}
+		tolakCutiLoading = true;
 		try {
-			await rejectLeave(id);
+			await rejectLeave(tolakCutiTarget.id, tolakCutiReason.trim());
+			showModalTolakCuti = false;
+			tolakCutiTarget = null;
 			await loadLeaves();
 		} catch (err) {
-			globalError = err instanceof Error ? err.message : 'Gagal menolak cuti';
+			tolakCutiFormError = err instanceof Error ? err.message : 'Gagal menolak cuti';
+		} finally {
+			tolakCutiLoading = false;
 		}
 	}
 
@@ -556,10 +734,21 @@
 				</div>
 				<button
 					type="button"
+					title="Ubah foto profil"
+					onclick={openModalFoto}
+					class="w-9 h-9 bg-amber-400 text-blue-950 font-black rounded-full flex items-center justify-center text-xs shadow border-2 border-white cursor-pointer hover:opacity-90 overflow-hidden">
+					{#if currentUser.photo_url}
+						<img src={currentUser.photo_url} alt="Foto profil" class="w-full h-full object-cover" />
+					{:else}
+						{currentUser.name ? currentUser.name.charAt(0).toUpperCase() : 'G'}
+					{/if}
+				</button>
+				<button
+					type="button"
 					title="Keluar"
 					onclick={handleLogout}
-					class="w-9 h-9 bg-amber-400 text-blue-950 font-black rounded-full flex items-center justify-center text-xs shadow border-2 border-white cursor-pointer hover:opacity-90">
-					{currentUser.name ? currentUser.name.charAt(0).toUpperCase() : 'G'}
+					class="w-9 h-9 bg-slate-100 text-slate-600 font-black rounded-full flex items-center justify-center text-sm shadow border-2 border-white cursor-pointer hover:bg-slate-200">
+					⏻
 				</button>
 			</div>
 		</div>
@@ -732,30 +921,59 @@
 							<table class="w-full text-left text-sm border-collapse">
 								<thead>
 									<tr class="border-b border-slate-200 text-slate-500 text-xs uppercase font-bold bg-slate-50/50">
+										<th class="py-3 px-4">Foto</th>
 										<th class="py-3 px-4">NIP</th>
 										<th class="py-3 px-4">Nama Lengkap</th>
 										<th class="py-3 px-4">Email</th>
 										<th class="py-3 px-4">Role</th>
+										<th class="py-3 px-4">Status</th>
 										<th class="py-3 px-4 text-right">Aksi</th>
 									</tr>
 								</thead>
 								<tbody class="divide-y divide-slate-100">
 									{#each teachers as g}
-										<tr class="hover:bg-slate-50">
+										<tr class="hover:bg-slate-50 {!g.is_active ? 'opacity-60' : ''}">
+											<td class="py-3.5 px-4">
+												<div class="w-9 h-9 rounded-full overflow-hidden bg-blue-100 text-blue-900 border border-slate-200 flex items-center justify-center text-xs font-black">
+													{#if g.photo_url}
+														<img src={g.photo_url} alt={g.name} class="w-full h-full object-cover" />
+													{:else}
+														{g.name ? g.name.charAt(0).toUpperCase() : '?'}
+													{/if}
+												</div>
+											</td>
 											<td class="py-3.5 px-4 font-mono text-slate-600 font-semibold">{g.nip}</td>
 											<td class="py-3.5 px-4 font-bold text-slate-800">{g.name}</td>
 											<td class="py-3.5 px-4 text-slate-600">{g.email ?? '-'}</td>
 											<td class="py-3.5 px-4 text-slate-600">{roleLabel(g.role)}</td>
+											<td class="py-3.5 px-4">
+												{#if g.is_active}
+													<span class="inline-flex items-center gap-1 bg-emerald-100 text-emerald-700 px-2.5 py-1 rounded-full text-[11px] font-bold">
+														<span class="w-1.5 h-1.5 rounded-full bg-emerald-600"></span> Aktif
+													</span>
+												{:else}
+													<span class="inline-flex items-center gap-1 bg-slate-200 text-slate-500 px-2.5 py-1 rounded-full text-[11px] font-bold">
+														<span class="w-1.5 h-1.5 rounded-full bg-slate-400"></span> Nonaktif
+													</span>
+												{/if}
+											</td>
 											<td class="py-3.5 px-4 text-right">
 												<div class="flex justify-end gap-2">
 													<button type="button" onclick={() => openEditGuru(g)}
 														class="bg-slate-200 text-slate-700 px-3 py-1 rounded text-xs font-bold cursor-pointer border-0 hover:bg-slate-300 transition">
 														✏️ Edit
 													</button>
-													<button type="button" onclick={() => handleDeleteGuru(g)}
-														class="bg-rose-100 text-rose-700 px-3 py-1 rounded text-xs font-bold cursor-pointer border-0 hover:bg-rose-200 transition">
-														🗑️ Nonaktifkan
-													</button>
+													{#if g.is_active}
+														<button type="button" onclick={() => handleDeleteGuru(g)}
+															class="bg-rose-100 text-rose-700 px-3 py-1 rounded text-xs font-bold cursor-pointer border-0 hover:bg-rose-200 transition">
+															🚫 Nonaktifkan
+														</button>
+													{:else}
+														<button type="button" onclick={() => handleActivateGuru(g)}
+															class="bg-emerald-100 text-emerald-700 px-3 py-1 rounded text-xs font-bold cursor-pointer border-0 hover:bg-emerald-200 transition">
+															✅ Aktifkan
+														</button>
+													{/if}
 												</div>
 											</td>
 										</tr>
@@ -786,7 +1004,10 @@
 							<table class="w-full text-left text-sm border-collapse">
 								<thead>
 									<tr class="border-b border-slate-200 text-slate-500 text-xs uppercase font-bold bg-slate-50/50">
-										<th class="py-3 px-4">Kode QR</th>
+										<th class="py-3 px-4">
+											Kode QR
+											<span class="block text-[9px] font-normal normal-case text-slate-400">(berganti otomatis, lihat "QR Live")</span>
+										</th>
 										<th class="py-3 px-4">Nama Ruangan</th>
 										<th class="py-3 px-4 text-right">Aksi</th>
 									</tr>
@@ -800,7 +1021,7 @@
 												<div class="flex justify-end gap-2">
 													<button type="button" onclick={() => openQRModal(r)}
 														class="bg-emerald-700 text-white px-3.5 py-1.5 rounded-md text-xs font-bold cursor-pointer border-0 hover:bg-emerald-800 transition inline-flex items-center gap-1 shadow-sm">
-														🖨️ Cetak QR
+														📱 QR Live
 													</button>
 													<button type="button" onclick={() => openEditRuangan(r)}
 														class="bg-slate-200 text-slate-700 px-3 py-1.5 rounded-md text-xs font-bold cursor-pointer border-0 hover:bg-slate-300 transition">
@@ -935,7 +1156,7 @@
 															class="bg-emerald-700 text-white px-3 py-1 rounded text-xs font-bold cursor-pointer border-0 hover:bg-emerald-800 shadow-sm transition">
 															Setujui
 														</button>
-														<button type="button" onclick={() => handleReject(c.id)}
+														<button type="button" onclick={() => openTolakCuti(c)}
 															class="bg-rose-700 text-white px-3 py-1 rounded text-xs font-bold cursor-pointer border-0 hover:bg-rose-800 shadow-sm transition">
 															Tolak
 														</button>
@@ -944,6 +1165,11 @@
 													<span class="bg-emerald-100 text-emerald-800 border border-emerald-300 px-3 py-1 rounded-full text-xs font-bold inline-block">✅ Disetujui</span>
 												{:else if c.status === 'rejected'}
 													<span class="bg-rose-100 text-rose-800 border border-rose-300 px-3 py-1 rounded-full text-xs font-bold inline-block">❌ Ditolak</span>
+													{#if c.rejection_reason}
+														<p class="text-[11px] text-rose-600 mt-1.5 max-w-[220px] mx-auto text-left leading-snug">
+															<span class="font-bold">Alasan:</span> {c.rejection_reason}
+														</p>
+													{/if}
 												{:else}
 													<span class="bg-amber-100 text-amber-800 border border-amber-300 px-3 py-1 rounded-full text-xs font-bold inline-block">⏳ Menunggu</span>
 												{/if}
@@ -1026,31 +1252,60 @@
 	<div class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex justify-center items-center p-4 z-50">
 		<div class="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden border border-slate-200 text-center">
 			<div class="bg-blue-900 px-6 py-4 text-white flex justify-between items-center">
-				<h3 class="font-bold text-base">Kartu QR Code Kelas</h3>
-				<button type="button" onclick={() => (showModalQR = false)} class="text-blue-200 hover:text-white border-0 bg-transparent text-xl font-bold cursor-pointer">✕</button>
+				<h3 class="font-bold text-base">Kartu QR Code Kelas (Live)</h3>
+				<button type="button" onclick={closeQRModal} class="text-blue-200 hover:text-white border-0 bg-transparent text-xl font-bold cursor-pointer">✕</button>
 			</div>
 
 			<div class="p-6 space-y-4">
 				<div class="border-2 border-dashed border-slate-300 p-6 rounded-2xl bg-slate-50 space-y-3">
-					<p class="text-xs font-bold text-slate-400 uppercase tracking-widest">{selectedRoom.qr_string}</p>
+					<p class="text-xs font-bold text-slate-400 uppercase tracking-widest font-mono">
+						{qrLoading && !qrCurrentString ? 'Memuat...' : qrCurrentString}
+					</p>
 					<h4 class="text-lg font-black text-blue-950">{selectedRoom.name}</h4>
 
-					<div class="w-48 h-48 bg-white border-4 border-slate-900 rounded-2xl mx-auto p-2 flex items-center justify-center shadow-md">
-						<img
-							src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${selectedRoom.qr_string}`}
-							alt="QR Code {selectedRoom.name}"
-							class="w-full h-full object-contain rounded-lg" />
+					<div class="w-48 h-48 bg-white border-4 border-slate-900 rounded-2xl mx-auto p-2 flex items-center justify-center shadow-md relative">
+						{#if qrCurrentString}
+							<img
+								src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${qrCurrentString}`}
+								alt="QR Code {selectedRoom.name}"
+								class="w-full h-full object-contain rounded-lg transition-opacity {qrLoading ? 'opacity-60' : 'opacity-100'}" />
+						{:else}
+							<p class="text-xs text-slate-400">Memuat QR...</p>
+						{/if}
 					</div>
 
-					<p class="text-[10px] text-slate-500 font-medium">Tempelkan stiker ini di pintu atau papan tulis kelas</p>
+					{#if qrError}
+						<div class="bg-rose-50 border border-rose-200 text-rose-700 p-2 rounded-lg text-xs font-semibold">{qrError}</div>
+					{/if}
+
+					<!-- Indikator hitung mundur: QR ini otomatis berganti tiap qrRotationSecondsVal detik -->
+					<div class="space-y-1.5">
+						<div class="w-full h-1.5 bg-slate-200 rounded-full overflow-hidden">
+							<div
+								class="h-full bg-emerald-600 transition-all duration-1000 ease-linear"
+								style="width: {qrRotationSecondsVal > 0 ? Math.min(100, (qrExpiresIn / qrRotationSecondsVal) * 100) : 0}%">
+							</div>
+						</div>
+						<p class="text-[11px] font-bold text-emerald-700">
+							🔄 QR berganti otomatis dalam {qrExpiresIn}s
+						</p>
+					</div>
+
+					<p class="text-[10px] text-slate-500 font-medium">
+						Tunjukkan layar ini langsung ke guru untuk discan — jangan dicetak/screenshot, karena kode akan kedaluwarsa dalam hitungan detik.
+					</p>
 				</div>
 
 				<div class="flex gap-2">
-					<button type="button" onclick={() => (showModalQR = false)} class="flex-1 py-2.5 bg-slate-200 text-slate-700 rounded-xl text-xs font-bold border-0 cursor-pointer hover:bg-slate-300">
+					<button type="button" onclick={closeQRModal} class="flex-1 py-2.5 bg-slate-200 text-slate-700 rounded-xl text-xs font-bold border-0 cursor-pointer hover:bg-slate-300">
 						Tutup
 					</button>
-					<button type="button" onclick={() => window.print()} class="flex-1 py-2.5 bg-emerald-700 text-white rounded-xl text-xs font-bold border-0 cursor-pointer hover:bg-emerald-800 shadow-md flex items-center justify-center gap-1">
-						<span>🖨️</span> Cetak Stiker
+					<button
+						type="button"
+						onclick={handleRefreshQRNow}
+						disabled={qrLoading}
+						class="flex-1 py-2.5 bg-emerald-700 text-white rounded-xl text-xs font-bold border-0 cursor-pointer hover:bg-emerald-800 shadow-md flex items-center justify-center gap-1 disabled:opacity-60 disabled:cursor-not-allowed">
+						<span>🔄</span> Refresh Sekarang
 					</button>
 				</div>
 			</div>
@@ -1097,6 +1352,89 @@
 				<div class="flex justify-end gap-2 pt-3 border-t border-slate-100">
 					<button type="button" onclick={() => (showModalAjukanCuti = false)} class="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-slate-200">Batal</button>
 					<button type="submit" class="px-4 py-2 bg-blue-900 text-white rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-blue-950">Kirim Permohonan</button>
+				</div>
+			</form>
+		</div>
+	</div>
+{/if}
+
+<!-- ================= MODAL UBAH FOTO PROFIL ================= -->
+{#if showModalFoto}
+	<div class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex justify-center items-center p-4 z-50">
+		<div class="bg-white rounded-xl shadow-2xl w-full max-w-sm overflow-hidden border border-slate-200">
+			<div class="bg-blue-900 px-6 py-4 text-white flex justify-between items-center">
+				<h3 class="font-bold text-base">Ubah Foto Profil</h3>
+				<button type="button" onclick={() => (showModalFoto = false)} class="text-blue-200 hover:text-white border-0 bg-transparent text-xl font-bold cursor-pointer">✕</button>
+			</div>
+
+			<div class="p-6 space-y-4">
+				{#if fotoError}
+					<div class="bg-rose-50 border border-rose-200 text-rose-700 p-2.5 rounded-lg text-xs font-semibold">{fotoError}</div>
+				{/if}
+
+				<div class="flex justify-center">
+					<div class="w-28 h-28 rounded-full overflow-hidden bg-slate-100 border-2 border-slate-200 flex items-center justify-center text-3xl font-black text-slate-400">
+						{#if fotoPreview}
+							<img src={fotoPreview} alt="Preview foto" class="w-full h-full object-cover" />
+						{:else if currentUser?.photo_url}
+							<img src={currentUser.photo_url} alt="Foto profil saat ini" class="w-full h-full object-cover" />
+						{:else}
+							{currentUser?.name ? currentUser.name.charAt(0).toUpperCase() : 'G'}
+						{/if}
+					</div>
+				</div>
+
+				<div>
+					<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Pilih Foto Baru</label>
+					<input type="file" accept="image/png,image/jpeg,image/webp" onchange={handlePickFoto}
+						class="w-full border border-slate-300 rounded-lg p-2 text-xs file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:bg-blue-50 file:text-blue-800 file:text-xs file:font-bold cursor-pointer" />
+					<p class="text-[11px] text-slate-400 mt-1">JPEG, PNG, atau WEBP. Maksimal 2MB.</p>
+				</div>
+
+				<div class="flex justify-end gap-2 pt-3 border-t border-slate-100">
+					<button type="button" onclick={() => (showModalFoto = false)} class="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-slate-200">Batal</button>
+					<button type="button" onclick={handleSaveFoto} disabled={fotoLoading || !fotoPreview}
+						class="px-4 py-2 bg-blue-900 text-white rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-blue-950 disabled:opacity-50 disabled:cursor-not-allowed">
+						{fotoLoading ? 'Menyimpan...' : 'Simpan Foto'}
+					</button>
+				</div>
+			</div>
+		</div>
+	</div>
+{/if}
+
+<!-- ================= MODAL ALASAN PENOLAKAN CUTI (ADMIN) ================= -->
+{#if showModalTolakCuti && tolakCutiTarget}
+	<div class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex justify-center items-center p-4 z-50">
+		<div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
+			<div class="bg-rose-700 px-6 py-4 text-white flex justify-between items-center">
+				<h3 class="font-bold text-base">Tolak Pengajuan Cuti / Izin</h3>
+				<button type="button" onclick={() => (showModalTolakCuti = false)} class="text-rose-200 hover:text-white border-0 bg-transparent text-xl font-bold cursor-pointer">✕</button>
+			</div>
+
+			<form onsubmit={handleReject} class="p-6 space-y-4">
+				{#if tolakCutiFormError}
+					<div class="bg-rose-50 border border-rose-200 text-rose-700 p-2.5 rounded-lg text-xs font-semibold">{tolakCutiFormError}</div>
+				{/if}
+
+				<div class="bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs text-slate-600">
+					<p><span class="font-bold text-slate-800">{tolakCutiTarget.teacher_name ?? 'Guru'}</span></p>
+					<p>{tolakCutiTarget.start_date} s/d {tolakCutiTarget.end_date} &middot; <span class="capitalize">{tolakCutiTarget.leave_type}</span></p>
+				</div>
+
+				<div>
+					<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Alasan Penolakan</label>
+					<textarea bind:value={tolakCutiReason} required rows="3" placeholder="Contoh: Jadwal mengajar pada tanggal tersebut belum ada guru pengganti"
+						class="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-rose-700 focus:outline-none"></textarea>
+					<p class="text-[11px] text-slate-400 mt-1">Alasan ini akan ditampilkan ke guru yang mengajukan.</p>
+				</div>
+
+				<div class="flex justify-end gap-2 pt-3 border-t border-slate-100">
+					<button type="button" onclick={() => (showModalTolakCuti = false)} class="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-slate-200">Batal</button>
+					<button type="submit" disabled={tolakCutiLoading}
+						class="px-4 py-2 bg-rose-700 text-white rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-rose-800 disabled:opacity-60 disabled:cursor-not-allowed">
+						{tolakCutiLoading ? 'Memproses...' : 'Tolak Pengajuan'}
+					</button>
 				</div>
 			</form>
 		</div>

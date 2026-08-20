@@ -13,7 +13,13 @@ export function getToken(): string | null {
 	return localStorage.getItem(TOKEN_KEY);
 }
 
-export function getStoredUser(): { id: number; name: string; email: string; role: string } | null {
+export function getStoredUser(): {
+	id: number;
+	name: string;
+	email: string;
+	photo_url?: string;
+	role: string;
+} | null {
 	if (typeof localStorage === 'undefined') return null;
 	const raw = localStorage.getItem(USER_KEY);
 	return raw ? JSON.parse(raw) : null;
@@ -22,6 +28,16 @@ export function getStoredUser(): { id: number; name: string; email: string; role
 function setSession(token: string, user: unknown) {
 	localStorage.setItem(TOKEN_KEY, token);
 	localStorage.setItem(USER_KEY, JSON.stringify(user));
+}
+
+// Perbarui sebagian data user yang sedang login di localStorage (dipakai
+// misalnya setelah guru mengganti foto profil), tanpa perlu login ulang.
+export function patchStoredUser(patch: Record<string, unknown>) {
+	const current = getStoredUser();
+	if (!current) return;
+	const updated = { ...current, ...patch };
+	localStorage.setItem(USER_KEY, JSON.stringify(updated));
+	return updated;
 }
 
 export function clearSession() {
@@ -79,7 +95,13 @@ async function request<T>(
 // ------------------------------------------------------------------
 export interface LoginResult {
 	token: string;
-	user: { id: number; name: string; email: string; role: 'admin' | 'guru' | 'guru_pengganti' };
+	user: {
+		id: number;
+		name: string;
+		email: string;
+		photo_url?: string;
+		role: 'admin' | 'guru' | 'guru_pengganti';
+	};
 }
 
 export async function login(nip: string, password: string): Promise<LoginResult> {
@@ -100,6 +122,7 @@ export interface Teacher {
 	name: string;
 	nip: string;
 	email?: string;
+	photo_url?: string;
 	role: 'admin' | 'guru' | 'guru_pengganti';
 	is_active: boolean;
 	created_at: string;
@@ -123,6 +146,9 @@ export const updateTeacher = (
 export const deleteTeacher = (id: number) =>
 	request<null>(`/admin/teachers/${id}`, { method: 'DELETE' });
 
+export const activateTeacher = (id: number) =>
+	request<null>(`/admin/teachers/${id}/activate`, { method: 'PUT' });
+
 // ------------------------------------------------------------------
 // Rooms (Admin)
 // ------------------------------------------------------------------
@@ -131,6 +157,19 @@ export interface Room {
 	name: string;
 	qr_string: string;
 	is_active: boolean;
+	qr_expires_at?: string;
+}
+
+// Bentuk respons endpoint QR "live" (GET /qr dan POST /refresh-qr) —
+// selalu mengembalikan qr_string terbaru + sisa detik sebelum berganti lagi.
+export interface RoomQR {
+	id: number;
+	name: string;
+	qr_string: string;
+	is_active: boolean;
+	expires_at: string;
+	expires_in_seconds: number;
+	rotation_seconds: number;
 }
 
 export const listRooms = () => request<Room[]>('/admin/rooms');
@@ -146,6 +185,17 @@ export const updateRoom = (id: number, name: string) =>
 
 export const deleteRoom = (id: number) =>
 	request<null>(`/admin/rooms/${id}`, { method: 'DELETE' });
+
+// Ambil QR yang sedang berlaku untuk sebuah ruangan. Backend otomatis
+// merotasi QR-nya kalau yang lama sudah kedaluwarsa (lazy rotation), jadi
+// endpoint ini aman dipanggil berulang (polling) untuk menjaga QR di layar
+// admin tetap "hidup" dan sulit dipakai dari foto/screenshot lama.
+export const getRoomQR = (id: number) => request<RoomQR>(`/admin/rooms/${id}/qr`);
+
+// Paksa QR ruangan berganti saat itu juga (misal admin curiga QR lama
+// sudah tersebar/difoto dari luar kelas).
+export const refreshRoomQR = (id: number) =>
+	request<RoomQR>(`/admin/rooms/${id}/refresh-qr`, { method: 'POST' });
 
 // ------------------------------------------------------------------
 // Schedules (Admin)
@@ -204,6 +254,7 @@ export interface Leave {
 	leave_type: string;
 	reason: string;
 	status: 'pending' | 'approved' | 'rejected';
+	rejection_reason?: string;
 	created_at: string;
 }
 
@@ -221,8 +272,9 @@ export const createLeave = (payload: {
 export const approveLeave = (id: number) =>
 	request<null>(`/admin/leaves/${id}/approve`, { method: 'PUT' });
 
-export const rejectLeave = (id: number) =>
-	request<null>(`/admin/leaves/${id}/reject`, { method: 'PUT' });
+// Admin wajib mengisi alasan penolakan supaya guru tahu kenapa pengajuannya ditolak.
+export const rejectLeave = (id: number, reason: string) =>
+	request<null>(`/admin/leaves/${id}/reject`, { method: 'PUT', body: { reason } });
 
 // ------------------------------------------------------------------
 // Reports (Admin)
@@ -260,3 +312,26 @@ export const getHistoryLog = (params: { teacher_id?: number; start?: string; end
 	if (params.end) qs.set('end', params.end);
 	return request<HistoryRow[]>(`/admin/reports/history?${qs.toString()}`);
 };
+
+// ------------------------------------------------------------------
+// Profil (semua role yang login) — foto profil
+// ------------------------------------------------------------------
+export interface Profile {
+	id: number;
+	name: string;
+	nip: string;
+	email?: string;
+	photo_url?: string;
+	role: 'admin' | 'guru' | 'guru_pengganti';
+	is_active: boolean;
+}
+
+export const getMyProfile = () => request<Profile>('/profile');
+
+// photoBase64 harus berupa data URI lengkap, mis. "data:image/jpeg;base64,...."
+// (lihat helper fileToDataURL di halaman utama untuk mengonversi dari <input type="file">).
+export const updateMyPhoto = (photoBase64: string) =>
+	request<{ photo_url: string }>('/profile/photo', {
+		method: 'PUT',
+		body: { photo_base64: photoBase64 }
+	});
