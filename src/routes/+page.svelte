@@ -25,6 +25,12 @@
 		createLeave,
 		approveLeave,
 		rejectLeave,
+		listActiveLeaveTypes,
+		listLeaveTypesAdmin,
+		createLeaveType,
+		updateLeaveType,
+		deleteLeaveType,
+		activateLeaveType,
 		getMonthlyReport,
 		getHistoryLog,
 		updateMyPhoto,
@@ -32,6 +38,7 @@
 		type Room,
 		type Schedule,
 		type Leave,
+		type LeaveType,
 		type MonthlyRecapRow,
 		type HistoryRow
 	} from '$lib/api';
@@ -255,16 +262,14 @@
 	let showModalQR = $state(false);
 	let selectedRoom = $state<Room | null>(null);
 
-	// --- QR "live" (auto-refresh) di dalam modal, agar QR yang difoto/
-	// discreenshot dari luar kelas cepat kedaluwarsa dan tidak bisa dipakai
-	// untuk scan-in palsu dari rumah. ---
+	// --- QR (manual refresh) di dalam modal. QR TIDAK pernah berganti sendiri
+	// -- hanya berubah kalau admin menekan tombol "Refresh Sekarang" -- supaya
+	// QR yang sudah dicetak/ditempel di kelas tetap valid dan bisa dipakai
+	// berulang kali sampai memang sengaja di-refresh. ---
 	let qrLoading = $state(false);
 	let qrError = $state('');
 	let qrCurrentString = $state('');
-	let qrExpiresIn = $state(0); // detik tersisa sebelum QR berganti
-	let qrRotationSecondsVal = $state(20);
-	let qrPollTimer: ReturnType<typeof setInterval> | null = null;
-	let qrCountdownTimer: ReturnType<typeof setInterval> | null = null;
+	let qrLastRotatedAt = $state('');
 
 	async function loadRooms() {
 		roomsLoading = true;
@@ -294,20 +299,26 @@
 		}
 	}
 
-	function stopQRTimers() {
-		if (qrPollTimer) clearInterval(qrPollTimer);
-		if (qrCountdownTimer) clearInterval(qrCountdownTimer);
-		qrPollTimer = null;
-		qrCountdownTimer = null;
+	function formatRotatedAt(iso: string) {
+		if (!iso) return '-';
+		try {
+			return new Date(iso).toLocaleString('id-ID', {
+				dateStyle: 'medium',
+				timeStyle: 'short'
+			});
+		} catch {
+			return iso;
+		}
 	}
 
-	async function loadLiveQR(roomId: number, opts: { silent?: boolean } = {}) {
-		if (!opts.silent) qrLoading = true;
+	// Ambil QR ruangan APA ADANYA (tidak membuat/mengganti QR baru). Aman
+	// dipanggil setiap kali modal dibuka, karena tidak ada efek samping.
+	async function loadCurrentQR(roomId: number) {
+		qrLoading = true;
 		try {
 			const data = await getRoomQR(roomId);
 			qrCurrentString = data.qr_string;
-			qrExpiresIn = data.expires_in_seconds;
-			qrRotationSecondsVal = data.rotation_seconds;
+			qrLastRotatedAt = data.last_rotated_at ?? '';
 			qrError = '';
 		} catch (err) {
 			qrError = err instanceof Error ? err.message : 'Gagal memuat QR';
@@ -316,15 +327,23 @@
 		}
 	}
 
+	// Satu-satunya cara QR ruangan berganti: admin sengaja menekan tombol ini.
 	async function handleRefreshQRNow() {
 		if (!selectedRoom) return;
+		if (
+			!confirm(
+				'QR lama akan berhenti berlaku dan diganti QR baru. Stiker/cetakan QR lama harus dicetak ulang. Lanjutkan?'
+			)
+		) {
+			return;
+		}
 		qrLoading = true;
 		try {
 			const data = await refreshRoomQR(selectedRoom.id);
 			qrCurrentString = data.qr_string;
-			qrExpiresIn = data.expires_in_seconds;
-			qrRotationSecondsVal = data.rotation_seconds;
+			qrLastRotatedAt = data.last_rotated_at ?? '';
 			qrError = '';
+			await loadRooms();
 		} catch (err) {
 			qrError = err instanceof Error ? err.message : 'Gagal me-refresh QR';
 		} finally {
@@ -337,23 +356,18 @@
 		showModalQR = true;
 		qrError = '';
 		qrCurrentString = '';
-		stopQRTimers();
-
-		await loadLiveQR(room.id);
-
-		// Poll ke server tiap 3 detik supaya QR selalu sinkron dengan yang
-		// tervalidasi di backend (backend yang jadi sumber kebenaran waktu,
-		// bukan jam device, supaya tidak bisa dicurangi).
-		qrPollTimer = setInterval(() => loadLiveQR(room.id, { silent: true }), 3000);
-		// Hitung mundur visual per detik, disinkronkan ulang tiap kali poll berhasil.
-		qrCountdownTimer = setInterval(() => {
-			qrExpiresIn = qrExpiresIn > 0 ? qrExpiresIn - 1 : 0;
-		}, 1000);
+		qrLastRotatedAt = '';
+		await loadCurrentQR(room.id);
 	}
 
 	function closeQRModal() {
 		showModalQR = false;
-		stopQRTimers();
+	}
+
+	// Cetak kartu QR ruangan (area #qr-print-area saja, lihat CSS @media print
+	// di layout.css / style global).
+	function handlePrintQR() {
+		window.print();
 	}
 
 	let showModalEditRuangan = $state(false);
@@ -515,8 +529,27 @@
 	let leaves = $state<Leave[]>([]);
 	let leavesLoading = $state(false);
 	let showModalAjukanCuti = $state(false);
-	let newCuti = $state({ start_date: '', end_date: '', leave_type: 'sakit', reason: '' });
+	let newCuti = $state({ start_date: '', end_date: '', leave_type: '', reason: '' });
 	let cutiFormError = $state('');
+
+	// Jenis cuti/izin yang aktif, dipakai untuk mengisi dropdown form
+	// pengajuan cuti guru. Diambil dari master data (bukan hardcode lagi).
+	let leaveTypes = $state<LeaveType[]>([]);
+
+	async function loadLeaveTypes() {
+		try {
+			leaveTypes = (await listActiveLeaveTypes()) || [];
+			if (!newCuti.leave_type && leaveTypes.length > 0) {
+				newCuti.leave_type = leaveTypes[0].code;
+			}
+		} catch (err) {
+			globalError = err instanceof Error ? err.message : 'Gagal memuat jenis cuti/izin';
+		}
+	}
+
+	function leaveTypeLabel(code: string) {
+		return leaveTypes.find((lt) => lt.code === code)?.label ?? leaveTypesAdmin.find((lt) => lt.code === code)?.label ?? code;
+	}
 
 	// --- Modal alasan penolakan (admin wajib isi saat menolak cuti) ---
 	let showModalTolakCuti = $state(false);
@@ -541,13 +574,13 @@
 	async function handleAjukanCuti(e: Event) {
 		e.preventDefault();
 		cutiFormError = '';
-		if (!newCuti.start_date || !newCuti.end_date || !newCuti.reason) {
+		if (!newCuti.start_date || !newCuti.end_date || !newCuti.leave_type || !newCuti.reason) {
 			cutiFormError = 'Semua field wajib diisi';
 			return;
 		}
 		try {
 			await createLeave(newCuti);
-			newCuti = { start_date: '', end_date: '', leave_type: 'sakit', reason: '' };
+			newCuti = { start_date: '', end_date: '', leave_type: leaveTypes[0]?.code ?? '', reason: '' };
 			showModalAjukanCuti = false;
 			await loadLeaves();
 		} catch (err) {
@@ -590,6 +623,103 @@
 			tolakCutiFormError = err instanceof Error ? err.message : 'Gagal menolak cuti';
 		} finally {
 			tolakCutiLoading = false;
+		}
+	}
+
+	// ------------------------------------------------------------------
+	// 5b. Master Data Jenis Cuti/Izin (Admin) — GET/POST/PUT/DELETE
+	// /api/admin/leave-types. Sebelumnya jenis cuti di-hardcode di kode
+	// frontend (hanya "Sakit" & "Izin Dinas Luar"); sekarang admin bisa
+	// menambah/mengubah/menonaktifkan sendiri lewat dashboard ini.
+	// ------------------------------------------------------------------
+	let leaveTypesAdmin = $state<LeaveType[]>([]);
+	let leaveTypesAdminLoading = $state(false);
+
+	let showModalLeaveType = $state(false);
+	let newLeaveType = $state({ code: '', label: '' });
+	let leaveTypeFormError = $state('');
+
+	let showModalEditLeaveType = $state(false);
+	let editLeaveTypeId = $state<number | null>(null);
+	let editLeaveType = $state({ label: '' });
+	let editLeaveTypeFormError = $state('');
+
+	async function loadLeaveTypesAdmin() {
+		leaveTypesAdminLoading = true;
+		try {
+			leaveTypesAdmin = (await listLeaveTypesAdmin()) || [];
+		} catch (err) {
+			globalError = err instanceof Error ? err.message : 'Gagal memuat master data jenis cuti/izin';
+		} finally {
+			leaveTypesAdminLoading = false;
+		}
+	}
+
+	async function handleAddLeaveType(e: Event) {
+		e.preventDefault();
+		leaveTypeFormError = '';
+		if (!newLeaveType.label.trim()) {
+			leaveTypeFormError = 'Nama jenis cuti/izin wajib diisi';
+			return;
+		}
+		try {
+			await createLeaveType(newLeaveType);
+			newLeaveType = { code: '', label: '' };
+			showModalLeaveType = false;
+			await loadLeaveTypesAdmin();
+			await loadLeaveTypes();
+		} catch (err) {
+			leaveTypeFormError = err instanceof Error ? err.message : 'Gagal menambah jenis cuti/izin';
+		}
+	}
+
+	function openEditLeaveType(lt: LeaveType) {
+		editLeaveTypeId = lt.id;
+		editLeaveType = { label: lt.label };
+		editLeaveTypeFormError = '';
+		showModalEditLeaveType = true;
+	}
+
+	async function handleEditLeaveType(e: Event) {
+		e.preventDefault();
+		editLeaveTypeFormError = '';
+		if (!editLeaveType.label.trim() || editLeaveTypeId === null) {
+			editLeaveTypeFormError = 'Nama jenis cuti/izin wajib diisi';
+			return;
+		}
+		try {
+			await updateLeaveType(editLeaveTypeId, editLeaveType);
+			showModalEditLeaveType = false;
+			await loadLeaveTypesAdmin();
+			await loadLeaveTypes();
+		} catch (err) {
+			editLeaveTypeFormError = err instanceof Error ? err.message : 'Gagal memperbarui jenis cuti/izin';
+		}
+	}
+
+	async function handleDeleteLeaveType(lt: LeaveType) {
+		if (
+			!confirm(
+				`Nonaktifkan jenis cuti/izin "${lt.label}"? Jenis yang nonaktif tidak akan muncul lagi di form pengajuan cuti guru.`
+			)
+		)
+			return;
+		try {
+			await deleteLeaveType(lt.id);
+			await loadLeaveTypesAdmin();
+			await loadLeaveTypes();
+		} catch (err) {
+			globalError = err instanceof Error ? err.message : 'Gagal menonaktifkan jenis cuti/izin';
+		}
+	}
+
+	async function handleActivateLeaveType(lt: LeaveType) {
+		try {
+			await activateLeaveType(lt.id);
+			await loadLeaveTypesAdmin();
+			await loadLeaveTypes();
+		} catch (err) {
+			globalError = err instanceof Error ? err.message : 'Gagal mengaktifkan jenis cuti/izin';
 		}
 	}
 
@@ -654,10 +784,17 @@
 	async function loadEverythingForRole() {
 		globalError = '';
 		if (currentUser?.role === 'admin') {
-			await Promise.all([loadTeachers(), loadRooms(), loadSchedules(), loadLeaves(), loadTodayHistory()]);
+			await Promise.all([
+				loadTeachers(),
+				loadRooms(),
+				loadSchedules(),
+				loadLeaves(),
+				loadTodayHistory(),
+				loadLeaveTypesAdmin()
+			]);
 			await loadMonthlyReport();
 		} else {
-			await loadLeaves();
+			await Promise.all([loadLeaves(), loadLeaveTypes()]);
 		}
 	}
 
@@ -789,6 +926,11 @@
 						<button type="button" onclick={() => (activeTab = 'jadwal')}
 							class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-lg text-sm font-medium transition cursor-pointer border-0 {activeTab === 'jadwal' ? 'bg-blue-50 text-blue-900 font-bold border-l-4 border-blue-800' : 'text-slate-600 hover:bg-slate-50'}">
 							<span>📅</span> Jadwal Mengajar
+						</button>
+
+						<button type="button" onclick={() => (activeTab = 'jenis-cuti')}
+							class="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-lg text-sm font-medium transition cursor-pointer border-0 {activeTab === 'jenis-cuti' ? 'bg-blue-50 text-blue-900 font-bold border-l-4 border-blue-800' : 'text-slate-600 hover:bg-slate-50'}">
+							<span>🗂️</span> Master Data Cuti/Izin
 						</button>
 					{/if}
 
@@ -990,7 +1132,7 @@
 					<div class="p-6 border-b border-slate-200 flex justify-between items-center bg-slate-50">
 						<div>
 							<h2 class="text-lg font-bold text-slate-800">Data Ruangan Kelas & QR Code</h2>
-							<p class="text-xs text-slate-500">Kelola ruangan dan cetak stiker QR Code (dibuat otomatis oleh backend).</p>
+							<p class="text-xs text-slate-500">Kelola ruangan dan cetak stiker QR Code. QR tidak berubah sendiri — hanya berganti kalau Anda menekan "Refresh Sekarang".</p>
 						</div>
 						<button type="button" onclick={() => (showModalRuangan = true)}
 							class="bg-blue-900 text-white px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-blue-950 transition flex items-center gap-1.5 shadow-sm">
@@ -1006,7 +1148,7 @@
 									<tr class="border-b border-slate-200 text-slate-500 text-xs uppercase font-bold bg-slate-50/50">
 										<th class="py-3 px-4">
 											Kode QR
-											<span class="block text-[9px] font-normal normal-case text-slate-400">(berganti otomatis, lihat "QR Live")</span>
+											<span class="block text-[9px] font-normal normal-case text-slate-400">(tetap, sampai di-refresh manual)</span>
 										</th>
 										<th class="py-3 px-4">Nama Ruangan</th>
 										<th class="py-3 px-4 text-right">Aksi</th>
@@ -1021,7 +1163,7 @@
 												<div class="flex justify-end gap-2">
 													<button type="button" onclick={() => openQRModal(r)}
 														class="bg-emerald-700 text-white px-3.5 py-1.5 rounded-md text-xs font-bold cursor-pointer border-0 hover:bg-emerald-800 transition inline-flex items-center gap-1 shadow-sm">
-														📱 QR Live
+														📱 Lihat / Print QR
 													</button>
 													<button type="button" onclick={() => openEditRuangan(r)}
 														class="bg-slate-200 text-slate-700 px-3 py-1.5 rounded-md text-xs font-bold cursor-pointer border-0 hover:bg-slate-300 transition">
@@ -1099,6 +1241,77 @@
 					</div>
 				</div>
 
+			<!-- TAB: MASTER DATA JENIS CUTI/IZIN -->
+			{:else if activeTab === 'jenis-cuti' && currentUser.role === 'admin'}
+				<div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+					<div class="p-6 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+						<div>
+							<h2 class="text-lg font-bold text-slate-800">Master Data Jenis Cuti/Izin</h2>
+							<p class="text-xs text-slate-500">Kelola pilihan jenis cuti/izin yang muncul di form pengajuan guru — tidak lagi hardcode di aplikasi.</p>
+						</div>
+						<button type="button" onclick={() => (showModalLeaveType = true)}
+							class="bg-blue-900 text-white px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-blue-950 transition flex items-center gap-1.5 shadow-sm">
+							<span>+</span> Tambah Jenis Baru
+						</button>
+					</div>
+					<div class="p-6">
+						{#if leaveTypesAdminLoading}
+							<p class="text-sm text-slate-400">Memuat...</p>
+						{:else if leaveTypesAdmin.length === 0}
+							<p class="text-sm text-slate-400">Belum ada jenis cuti/izin. Tambahkan minimal satu supaya guru bisa mengajukan cuti.</p>
+						{:else}
+							<table class="w-full text-left text-sm border-collapse">
+								<thead>
+									<tr class="border-b border-slate-200 text-slate-500 text-xs uppercase font-bold bg-slate-50/50">
+										<th class="py-3 px-4">Kode</th>
+										<th class="py-3 px-4">Nama Jenis</th>
+										<th class="py-3 px-4">Status</th>
+										<th class="py-3 px-4 text-right">Aksi</th>
+									</tr>
+								</thead>
+								<tbody class="divide-y divide-slate-100">
+									{#each leaveTypesAdmin as lt}
+										<tr class="hover:bg-slate-50 {!lt.is_active ? 'opacity-60' : ''}">
+											<td class="py-3.5 px-4 font-mono text-slate-500">{lt.code}</td>
+											<td class="py-3.5 px-4 font-bold text-slate-800">{lt.label}</td>
+											<td class="py-3.5 px-4">
+												{#if lt.is_active}
+													<span class="inline-flex items-center gap-1 bg-emerald-100 text-emerald-700 px-2.5 py-1 rounded-full text-[11px] font-bold">
+														<span class="w-1.5 h-1.5 rounded-full bg-emerald-600"></span> Aktif
+													</span>
+												{:else}
+													<span class="inline-flex items-center gap-1 bg-slate-200 text-slate-500 px-2.5 py-1 rounded-full text-[11px] font-bold">
+														<span class="w-1.5 h-1.5 rounded-full bg-slate-400"></span> Nonaktif
+													</span>
+												{/if}
+											</td>
+											<td class="py-3.5 px-4 text-right">
+												<div class="flex justify-end gap-2">
+													<button type="button" onclick={() => openEditLeaveType(lt)}
+														class="bg-slate-200 text-slate-700 px-3 py-1 rounded text-xs font-bold cursor-pointer border-0 hover:bg-slate-300 transition">
+														✏️ Edit
+													</button>
+													{#if lt.is_active}
+														<button type="button" onclick={() => handleDeleteLeaveType(lt)}
+															class="bg-rose-100 text-rose-700 px-3 py-1 rounded text-xs font-bold cursor-pointer border-0 hover:bg-rose-200 transition">
+															🚫 Nonaktifkan
+														</button>
+													{:else}
+														<button type="button" onclick={() => handleActivateLeaveType(lt)}
+															class="bg-emerald-100 text-emerald-700 px-3 py-1 rounded text-xs font-bold cursor-pointer border-0 hover:bg-emerald-200 transition">
+															✅ Aktifkan
+														</button>
+													{/if}
+												</div>
+											</td>
+										</tr>
+									{/each}
+								</tbody>
+							</table>
+						{/if}
+					</div>
+				</div>
+
 			<!-- TAB: CUTI (SUDAH DIPERBAIKI UNTUK GURU & ADMIN) -->
 			{:else if activeTab === 'cuti'}
 				<div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
@@ -1147,7 +1360,7 @@
 												<td class="py-3.5 px-4 font-bold text-slate-800">{c.teacher_name ?? '-'}</td>
 											{/if}
 											<td class="py-3.5 px-4 text-slate-600">{c.start_date} s/d {c.end_date}</td>
-											<td class="py-3.5 px-4 text-slate-600 capitalize">{c.leave_type ?? 'sakit'}</td>
+											<td class="py-3.5 px-4 text-slate-600">{leaveTypeLabel(c.leave_type)}</td>
 											<td class="py-3.5 px-4 text-slate-600">{c.reason ?? '-'}</td>
 											<td class="py-3.5 px-4 text-center">
 												{#if currentUser.role === 'admin' && c.status === 'pending'}
@@ -1249,21 +1462,21 @@
 
 <!-- ================= MODAL CETAK QR CODE RUANGAN ================= -->
 {#if showModalQR && selectedRoom}
-	<div class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex justify-center items-center p-4 z-50">
-		<div class="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden border border-slate-200 text-center">
-			<div class="bg-blue-900 px-6 py-4 text-white flex justify-between items-center">
-				<h3 class="font-bold text-base">Kartu QR Code Kelas (Live)</h3>
+	<div class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex justify-center items-center p-4 z-50 print:static print:bg-white print:p-0">
+		<div class="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden border border-slate-200 text-center print:shadow-none print:border-0 print:rounded-none print:max-w-full">
+			<div class="bg-blue-900 px-6 py-4 text-white flex justify-between items-center print:hidden">
+				<h3 class="font-bold text-base">Kartu QR Code Kelas</h3>
 				<button type="button" onclick={closeQRModal} class="text-blue-200 hover:text-white border-0 bg-transparent text-xl font-bold cursor-pointer">✕</button>
 			</div>
 
 			<div class="p-6 space-y-4">
-				<div class="border-2 border-dashed border-slate-300 p-6 rounded-2xl bg-slate-50 space-y-3">
+				<div id="qr-print-area" class="border-2 border-dashed border-slate-300 p-6 rounded-2xl bg-slate-50 space-y-3 print:border-0 print:bg-white">
 					<p class="text-xs font-bold text-slate-400 uppercase tracking-widest font-mono">
 						{qrLoading && !qrCurrentString ? 'Memuat...' : qrCurrentString}
 					</p>
 					<h4 class="text-lg font-black text-blue-950">{selectedRoom.name}</h4>
 
-					<div class="w-48 h-48 bg-white border-4 border-slate-900 rounded-2xl mx-auto p-2 flex items-center justify-center shadow-md relative">
+					<div class="w-48 h-48 bg-white border-4 border-slate-900 rounded-2xl mx-auto p-2 flex items-center justify-center shadow-md relative print:shadow-none">
 						{#if qrCurrentString}
 							<img
 								src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${qrCurrentString}`}
@@ -1275,30 +1488,28 @@
 					</div>
 
 					{#if qrError}
-						<div class="bg-rose-50 border border-rose-200 text-rose-700 p-2 rounded-lg text-xs font-semibold">{qrError}</div>
+						<div class="bg-rose-50 border border-rose-200 text-rose-700 p-2 rounded-lg text-xs font-semibold print:hidden">{qrError}</div>
 					{/if}
 
-					<!-- Indikator hitung mundur: QR ini otomatis berganti tiap qrRotationSecondsVal detik -->
-					<div class="space-y-1.5">
-						<div class="w-full h-1.5 bg-slate-200 rounded-full overflow-hidden">
-							<div
-								class="h-full bg-emerald-600 transition-all duration-1000 ease-linear"
-								style="width: {qrRotationSecondsVal > 0 ? Math.min(100, (qrExpiresIn / qrRotationSecondsVal) * 100) : 0}%">
-							</div>
-						</div>
-						<p class="text-[11px] font-bold text-emerald-700">
-							🔄 QR berganti otomatis dalam {qrExpiresIn}s
-						</p>
-					</div>
+					<p class="text-[11px] font-semibold text-slate-500">
+						🕒 Terakhir di-refresh: {qrLastRotatedAt ? formatRotatedAt(qrLastRotatedAt) : '-'}
+					</p>
 
-					<p class="text-[10px] text-slate-500 font-medium">
-						Tunjukkan layar ini langsung ke guru untuk discan — jangan dicetak/screenshot, karena kode akan kedaluwarsa dalam hitungan detik.
+					<p class="text-[10px] text-slate-500 font-medium print:hidden">
+						QR ini tidak berubah sendiri — aman ditempel/dicetak di kelas. Kalau dicurigai tersebar, tekan "Refresh Sekarang" lalu cetak ulang stikernya.
 					</p>
 				</div>
 
-				<div class="flex gap-2">
+				<div class="flex gap-2 print:hidden">
 					<button type="button" onclick={closeQRModal} class="flex-1 py-2.5 bg-slate-200 text-slate-700 rounded-xl text-xs font-bold border-0 cursor-pointer hover:bg-slate-300">
 						Tutup
+					</button>
+					<button
+						type="button"
+						onclick={handlePrintQR}
+						disabled={qrLoading || !qrCurrentString}
+						class="flex-1 py-2.5 bg-blue-900 text-white rounded-xl text-xs font-bold border-0 cursor-pointer hover:bg-blue-950 shadow-md flex items-center justify-center gap-1 disabled:opacity-60 disabled:cursor-not-allowed">
+						<span>🖨️</span> Print
 					</button>
 					<button
 						type="button"
@@ -1312,6 +1523,7 @@
 		</div>
 	</div>
 {/if}
+
 
 <!-- ================= MODAL PENGAJUAN CUTI GURU ================= -->
 {#if showModalAjukanCuti}
@@ -1338,11 +1550,15 @@
 				</div>
 				<div>
 					<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Jenis</label>
-					<select bind:value={newCuti.leave_type} class="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-800 focus:outline-none bg-white">
-						<option value="sakit">Sakit</option>
-						<option value="dinas_luar">Izin Dinas Luar</option>
-						<option value="keperluan_keluarga">Keperluan Keluarga</option>
-					</select>
+					{#if leaveTypes.length === 0}
+						<p class="text-xs text-rose-600 font-semibold">Belum ada jenis cuti/izin yang aktif. Hubungi admin untuk menambahkannya di Master Data Cuti/Izin.</p>
+					{:else}
+						<select bind:value={newCuti.leave_type} required class="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-800 focus:outline-none bg-white">
+							{#each leaveTypes as lt}
+								<option value={lt.code}>{lt.label}</option>
+							{/each}
+						</select>
+					{/if}
 				</div>
 				<div>
 					<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Alasan</label>
@@ -1419,7 +1635,7 @@
 
 				<div class="bg-slate-50 border border-slate-200 rounded-lg p-3 text-xs text-slate-600">
 					<p><span class="font-bold text-slate-800">{tolakCutiTarget.teacher_name ?? 'Guru'}</span></p>
-					<p>{tolakCutiTarget.start_date} s/d {tolakCutiTarget.end_date} &middot; <span class="capitalize">{tolakCutiTarget.leave_type}</span></p>
+					<p>{tolakCutiTarget.start_date} s/d {tolakCutiTarget.end_date} &middot; <span>{leaveTypeLabel(tolakCutiTarget.leave_type)}</span></p>
 				</div>
 
 				<div>
@@ -1576,6 +1792,66 @@
 
 				<div class="flex justify-end gap-2 pt-3 border-t border-slate-100">
 					<button type="button" onclick={() => (showModalEditRuangan = false)} class="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-slate-200">Batal</button>
+					<button type="submit" class="px-4 py-2 bg-blue-900 text-white rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-blue-950">Simpan Perubahan</button>
+				</div>
+			</form>
+		</div>
+	</div>
+{/if}
+
+<!-- ================= MODAL TAMBAH JENIS CUTI/IZIN ================= -->
+{#if showModalLeaveType}
+	<div class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex justify-center items-center p-4 z-50">
+		<div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
+			<div class="bg-blue-900 px-6 py-4 text-white flex justify-between items-center">
+				<h3 class="font-bold text-base">Tambah Jenis Cuti/Izin</h3>
+				<button type="button" onclick={() => (showModalLeaveType = false)} class="text-blue-200 hover:text-white border-0 bg-transparent text-xl font-bold cursor-pointer">✕</button>
+			</div>
+
+			<form onsubmit={handleAddLeaveType} class="p-6 space-y-4">
+				{#if leaveTypeFormError}
+					<div class="bg-rose-50 border border-rose-200 text-rose-700 p-2.5 rounded-lg text-xs font-semibold">{leaveTypeFormError}</div>
+				{/if}
+				<div>
+					<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Nama Jenis</label>
+					<input type="text" bind:value={newLeaveType.label} placeholder="Contoh: Cuti Melahirkan" required class="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-800 focus:outline-none" />
+				</div>
+				<div>
+					<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Kode (opsional)</label>
+					<input type="text" bind:value={newLeaveType.code} placeholder="Kosongkan untuk dibuat otomatis dari nama" class="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-800 focus:outline-none" />
+					<p class="text-[11px] text-slate-400 mt-1">Kode dipakai di sistem sebagai nilai unik, tidak ditampilkan ke guru. Hanya huruf kecil/angka/underscore.</p>
+				</div>
+
+				<div class="flex justify-end gap-2 pt-3 border-t border-slate-100">
+					<button type="button" onclick={() => (showModalLeaveType = false)} class="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-slate-200">Batal</button>
+					<button type="submit" class="px-4 py-2 bg-blue-900 text-white rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-blue-950">Simpan Jenis</button>
+				</div>
+			</form>
+		</div>
+	</div>
+{/if}
+
+<!-- ================= MODAL EDIT JENIS CUTI/IZIN ================= -->
+{#if showModalEditLeaveType}
+	<div class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex justify-center items-center p-4 z-50">
+		<div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
+			<div class="bg-blue-900 px-6 py-4 text-white flex justify-between items-center">
+				<h3 class="font-bold text-base">Edit Jenis Cuti/Izin</h3>
+				<button type="button" onclick={() => (showModalEditLeaveType = false)} class="text-blue-200 hover:text-white border-0 bg-transparent text-xl font-bold cursor-pointer">✕</button>
+			</div>
+
+			<form onsubmit={handleEditLeaveType} class="p-6 space-y-4">
+				{#if editLeaveTypeFormError}
+					<div class="bg-rose-50 border border-rose-200 text-rose-700 p-2.5 rounded-lg text-xs font-semibold">{editLeaveTypeFormError}</div>
+				{/if}
+				<div>
+					<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Nama Jenis</label>
+					<input type="text" bind:value={editLeaveType.label} required class="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-800 focus:outline-none" />
+				</div>
+				<p class="text-xs text-slate-400">Kode tidak bisa diubah supaya riwayat pengajuan cuti lama tetap konsisten.</p>
+
+				<div class="flex justify-end gap-2 pt-3 border-t border-slate-100">
+					<button type="button" onclick={() => (showModalEditLeaveType = false)} class="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-slate-200">Batal</button>
 					<button type="submit" class="px-4 py-2 bg-blue-900 text-white rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-blue-950">Simpan Perubahan</button>
 				</div>
 			</form>

@@ -1,3 +1,24 @@
 @import 'tailwindcss';
 @plugin '@tailwindcss/forms';
 @plugin '@tailwindcss/typography';
+
+/* Cetak kartu QR ruangan: sembunyikan seluruh halaman (sidebar, header,
+   dashboard di belakang modal, dsb) dan hanya tampilkan area kartu QR
+   (#qr-print-area) di dalam modal QR Live, supaya hasil print rapi dan
+   tidak ikut mencetak elemen UI lainnya. */
+@media print {
+	body * {
+		visibility: hidden;
+	}
+	#qr-print-area,
+	#qr-print-area * {
+		visibility: visible;
+	}
+	#qr-print-area {
+		position: fixed;
+		inset: 0;
+		margin: auto;
+		width: 320px;
+		height: fit-content;
+	}
+}

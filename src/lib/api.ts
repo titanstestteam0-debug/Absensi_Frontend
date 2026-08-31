@@ -157,19 +157,19 @@ export interface Room {
 	name: string;
 	qr_string: string;
 	is_active: boolean;
-	qr_expires_at?: string;
+	qr_last_rotated_at?: string;
 }
 
-// Bentuk respons endpoint QR "live" (GET /qr dan POST /refresh-qr) —
-// selalu mengembalikan qr_string terbaru + sisa detik sebelum berganti lagi.
+// Bentuk respons endpoint QR (GET /qr dan POST /refresh-qr) — mengembalikan
+// qr_string yang sedang berlaku APA ADANYA. QR ini tidak pernah berubah
+// sendiri; hanya berganti kalau refreshRoomQR() dipanggil (klik tombol
+// "Refresh Sekarang" di UI).
 export interface RoomQR {
 	id: number;
 	name: string;
 	qr_string: string;
 	is_active: boolean;
-	expires_at: string;
-	expires_in_seconds: number;
-	rotation_seconds: number;
+	last_rotated_at?: string;
 }
 
 export const listRooms = () => request<Room[]>('/admin/rooms');
@@ -186,14 +186,14 @@ export const updateRoom = (id: number, name: string) =>
 export const deleteRoom = (id: number) =>
 	request<null>(`/admin/rooms/${id}`, { method: 'DELETE' });
 
-// Ambil QR yang sedang berlaku untuk sebuah ruangan. Backend otomatis
-// merotasi QR-nya kalau yang lama sudah kedaluwarsa (lazy rotation), jadi
-// endpoint ini aman dipanggil berulang (polling) untuk menjaga QR di layar
-// admin tetap "hidup" dan sulit dipakai dari foto/screenshot lama.
+// Ambil QR yang sedang berlaku untuk sebuah ruangan APA ADANYA — tidak ada
+// efek samping/rotasi, aman dipanggil berkali-kali (mis. tiap kali modal
+// dibuka) tanpa membuat QR baru.
 export const getRoomQR = (id: number) => request<RoomQR>(`/admin/rooms/${id}/qr`);
 
-// Paksa QR ruangan berganti saat itu juga (misal admin curiga QR lama
-// sudah tersebar/difoto dari luar kelas).
+// Satu-satunya cara qr_string ruangan berganti: dipanggil saat admin sengaja
+// menekan tombol "Refresh Sekarang" (misal QR lama dicurigai tersebar, atau
+// stiker lama rusak dan perlu dicetak ulang).
 export const refreshRoomQR = (id: number) =>
 	request<RoomQR>(`/admin/rooms/${id}/refresh-qr`, { method: 'POST' });
 
@@ -275,6 +275,36 @@ export const approveLeave = (id: number) =>
 // Admin wajib mengisi alasan penolakan supaya guru tahu kenapa pengajuannya ditolak.
 export const rejectLeave = (id: number, reason: string) =>
 	request<null>(`/admin/leaves/${id}/reject`, { method: 'PUT', body: { reason } });
+
+// ------------------------------------------------------------------
+// Jenis Cuti/Izin (Master Data) — dulunya hardcode di frontend, sekarang
+// dikelola Admin lewat dashboard (GET/POST/PUT/DELETE /api/admin/leave-types).
+// ------------------------------------------------------------------
+export interface LeaveType {
+	id: number;
+	code: string;
+	label: string;
+	is_active: boolean;
+	created_at: string;
+}
+
+// Dipakai guru untuk mengisi dropdown form pengajuan cuti (hanya yang aktif).
+export const listActiveLeaveTypes = () => request<LeaveType[]>('/leave-types');
+
+// Dipakai admin di halaman Master Data Cuti/Izin (termasuk yang nonaktif).
+export const listLeaveTypesAdmin = () => request<LeaveType[]>('/admin/leave-types');
+
+export const createLeaveType = (payload: { code: string; label: string }) =>
+	request<{ id: number }>('/admin/leave-types', { method: 'POST', body: payload });
+
+export const updateLeaveType = (id: number, payload: { label: string }) =>
+	request<null>(`/admin/leave-types/${id}`, { method: 'PUT', body: payload });
+
+export const deleteLeaveType = (id: number) =>
+	request<null>(`/admin/leave-types/${id}`, { method: 'DELETE' });
+
+export const activateLeaveType = (id: number) =>
+	request<null>(`/admin/leave-types/${id}/activate`, { method: 'PUT' });
 
 // ------------------------------------------------------------------
 // Reports (Admin)
