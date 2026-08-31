@@ -30,7 +30,6 @@
 		createLeaveType,
 		updateLeaveType,
 		deleteLeaveType,
-		activateLeaveType,
 		getMonthlyReport,
 		getHistoryLog,
 		updateMyPhoto,
@@ -700,7 +699,7 @@
 	async function handleDeleteLeaveType(lt: LeaveType) {
 		if (
 			!confirm(
-				`Nonaktifkan jenis cuti/izin "${lt.label}"? Jenis yang nonaktif tidak akan muncul lagi di form pengajuan cuti guru.`
+				`Hapus permanen jenis cuti/izin "${lt.label}"? Riwayat pengajuan cuti lama yang sudah memakai jenis ini tetap akan tampil, tapi jenis ini tidak akan muncul lagi di dropdown pengajuan guru. Tindakan ini tidak bisa dibatalkan.`
 			)
 		)
 			return;
@@ -709,17 +708,7 @@
 			await loadLeaveTypesAdmin();
 			await loadLeaveTypes();
 		} catch (err) {
-			globalError = err instanceof Error ? err.message : 'Gagal menonaktifkan jenis cuti/izin';
-		}
-	}
-
-	async function handleActivateLeaveType(lt: LeaveType) {
-		try {
-			await activateLeaveType(lt.id);
-			await loadLeaveTypesAdmin();
-			await loadLeaveTypes();
-		} catch (err) {
-			globalError = err instanceof Error ? err.message : 'Gagal mengaktifkan jenis cuti/izin';
+			globalError = err instanceof Error ? err.message : 'Gagal menghapus jenis cuti/izin';
 		}
 	}
 
@@ -1265,43 +1254,24 @@
 									<tr class="border-b border-slate-200 text-slate-500 text-xs uppercase font-bold bg-slate-50/50">
 										<th class="py-3 px-4">Kode</th>
 										<th class="py-3 px-4">Nama Jenis</th>
-										<th class="py-3 px-4">Status</th>
 										<th class="py-3 px-4 text-right">Aksi</th>
 									</tr>
 								</thead>
 								<tbody class="divide-y divide-slate-100">
 									{#each leaveTypesAdmin as lt}
-										<tr class="hover:bg-slate-50 {!lt.is_active ? 'opacity-60' : ''}">
+										<tr class="hover:bg-slate-50">
 											<td class="py-3.5 px-4 font-mono text-slate-500">{lt.code}</td>
 											<td class="py-3.5 px-4 font-bold text-slate-800">{lt.label}</td>
-											<td class="py-3.5 px-4">
-												{#if lt.is_active}
-													<span class="inline-flex items-center gap-1 bg-emerald-100 text-emerald-700 px-2.5 py-1 rounded-full text-[11px] font-bold">
-														<span class="w-1.5 h-1.5 rounded-full bg-emerald-600"></span> Aktif
-													</span>
-												{:else}
-													<span class="inline-flex items-center gap-1 bg-slate-200 text-slate-500 px-2.5 py-1 rounded-full text-[11px] font-bold">
-														<span class="w-1.5 h-1.5 rounded-full bg-slate-400"></span> Nonaktif
-													</span>
-												{/if}
-											</td>
 											<td class="py-3.5 px-4 text-right">
 												<div class="flex justify-end gap-2">
 													<button type="button" onclick={() => openEditLeaveType(lt)}
 														class="bg-slate-200 text-slate-700 px-3 py-1 rounded text-xs font-bold cursor-pointer border-0 hover:bg-slate-300 transition">
 														✏️ Edit
 													</button>
-													{#if lt.is_active}
-														<button type="button" onclick={() => handleDeleteLeaveType(lt)}
-															class="bg-rose-100 text-rose-700 px-3 py-1 rounded text-xs font-bold cursor-pointer border-0 hover:bg-rose-200 transition">
-															🚫 Nonaktifkan
-														</button>
-													{:else}
-														<button type="button" onclick={() => handleActivateLeaveType(lt)}
-															class="bg-emerald-100 text-emerald-700 px-3 py-1 rounded text-xs font-bold cursor-pointer border-0 hover:bg-emerald-200 transition">
-															✅ Aktifkan
-														</button>
-													{/if}
+													<button type="button" onclick={() => handleDeleteLeaveType(lt)}
+														class="bg-rose-100 text-rose-700 px-3 py-1 rounded text-xs font-bold cursor-pointer border-0 hover:bg-rose-200 transition">
+														🗑️ Hapus
+													</button>
 												</div>
 											</td>
 										</tr>

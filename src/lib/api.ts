@@ -303,9 +303,6 @@ export const updateLeaveType = (id: number, payload: { label: string }) =>
 export const deleteLeaveType = (id: number) =>
 	request<null>(`/admin/leave-types/${id}`, { method: 'DELETE' });
 
-export const activateLeaveType = (id: number) =>
-	request<null>(`/admin/leave-types/${id}/activate`, { method: 'PUT' });
-
 // ------------------------------------------------------------------
 // Reports (Admin)
 // ------------------------------------------------------------------
