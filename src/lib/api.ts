@@ -269,6 +269,21 @@ export const createLeave = (payload: {
 	attachment_url?: string;
 }) => request<{ id: number }>('/leaves', { method: 'POST', body: payload });
 
+// Admin membantu mengajukan cuti/izin atas nama seorang guru -- LANGSUNG
+// berstatus approved, tanpa perlu melalui alur persetujuan pending seperti
+// pengajuan mandiri oleh guru (mis. untuk kondisi darurat mendadak).
+export const adminCreateLeave = (payload: {
+	teacher_id: number;
+	start_date: string;
+	end_date: string;
+	leave_type: string;
+	reason: string;
+	attachment_url?: string;
+}) => request<{ id: number; teacher_id: number; status: string }>('/admin/leaves', {
+	method: 'POST',
+	body: payload
+});
+
 export const approveLeave = (id: number) =>
 	request<null>(`/admin/leaves/${id}/approve`, { method: 'PUT' });
 
@@ -309,11 +324,18 @@ export const deleteLeaveType = (id: number) =>
 export interface MonthlyRecapRow {
 	teacher_id: number;
 	teacher_name: string;
+	teacher_role: string;
 	total_sesi: number;
 	sesi_tuntas: number;
 	sesi_tidak_tuntas: number;
 	total_jp_aktual: number;
 	total_jp_target: number;
+	// Info guru pengganti -- ditambahkan supaya rekap bulanan tidak cuma
+	// menampilkan jadwal tetap, tapi juga aktivitas inval.
+	sesi_sebagai_pengganti: number;
+	jp_sebagai_pengganti: number;
+	sesi_digantikan: number;
+	jumlah_cuti: number;
 }
 
 export const getMonthlyReport = (month: number, year: number) =>
@@ -339,6 +361,97 @@ export const getHistoryLog = (params: { teacher_id?: number; start?: string; end
 	if (params.end) qs.set('end', params.end);
 	return request<HistoryRow[]>(`/admin/reports/history?${qs.toString()}`);
 };
+
+// --- Laporan Absensi Harian: rekap per tanggal, dari tanggal 1 s/d hari ini
+// (bisa digeser start_day, asal masih di bulan yang sama). ---
+export interface DailyReportRow {
+	date: string;
+	total_sesi: number;
+	sesi_tuntas: number;
+	sesi_tidak_tuntas: number;
+	sesi_berlangsung: number;
+	jumlah_guru_hadir: number;
+	sesi_digantikan: number;
+	total_jp_aktual: number;
+}
+
+export interface DailyReport {
+	year: number;
+	month: number;
+	start_day: number;
+	end_day: number;
+	start_date: string;
+	end_date: string;
+	days: DailyReportRow[];
+}
+
+export const getDailyReport = (year: number, month: number, startDay: number) =>
+	request<DailyReport>(`/admin/reports/daily?year=${year}&month=${month}&start_day=${startDay}`);
+
+// --- Rekap sesi sebagai Guru Pengganti (inval) -- tidak terikat target JP. ---
+export interface SubstituteSessionRow {
+	id: number;
+	date: string;
+	substitute_id: number;
+	substitute_name: string;
+	original_teacher_id: number;
+	original_teacher_name: string;
+	room_name: string | null;
+	clock_in: string | null;
+	clock_out: string | null;
+	actual_jp: number;
+}
+
+export interface SubstituteReport {
+	total_sesi: number;
+	total_jp: number;
+	sessions: SubstituteSessionRow[];
+}
+
+export const getSubstituteReport = (params: { start?: string; end?: string; teacher_id?: number }) => {
+	const qs = new URLSearchParams();
+	if (params.start) qs.set('start', params.start);
+	if (params.end) qs.set('end', params.end);
+	if (params.teacher_id) qs.set('teacher_id', String(params.teacher_id));
+	return request<SubstituteReport>(`/admin/reports/substitutes?${qs.toString()}`);
+};
+
+// --- Laporan Tahunan / Individu per guru: breakdown 12 bulan, dipakai juga
+// sebagai dasar export "Laporan CSV Individu". ---
+export interface AnnualMonthRow {
+	month: number;
+	month_name: string;
+	total_sesi: number;
+	sesi_tuntas: number;
+	sesi_tidak_tuntas: number;
+	jp_aktual: number;
+	jp_target: number;
+	sesi_sebagai_pengganti: number;
+	jp_sebagai_pengganti: number;
+	jumlah_cuti: number;
+	has_data: boolean;
+	consistent: boolean;
+}
+
+export interface AnnualReport {
+	teacher_id: number;
+	teacher_name: string;
+	teacher_role: string;
+	year: number;
+	months: AnnualMonthRow[];
+	total_sesi: number;
+	total_sesi_tuntas: number;
+	total_sesi_tidak_tuntas: number;
+	total_jp_aktual: number;
+	total_jp_target: number;
+	total_sesi_sebagai_pengganti: number;
+	total_jp_sebagai_pengganti: number;
+	total_jumlah_cuti: number;
+	konsisten_setahun: boolean;
+}
+
+export const getAnnualReport = (year: number, teacherId: number) =>
+	request<AnnualReport>(`/admin/reports/annual?year=${year}&teacher_id=${teacherId}`);
 
 // ------------------------------------------------------------------
 // Profil (semua role yang login) — foto profil

@@ -23,6 +23,7 @@
 		listAllLeaves,
 		listMyLeaves,
 		createLeave,
+		adminCreateLeave,
 		approveLeave,
 		rejectLeave,
 		listActiveLeaveTypes,
@@ -32,6 +33,9 @@
 		deleteLeaveType,
 		getMonthlyReport,
 		getHistoryLog,
+		getDailyReport,
+		getSubstituteReport,
+		getAnnualReport,
 		updateMyPhoto,
 		type Teacher,
 		type Room,
@@ -39,7 +43,10 @@
 		type Leave,
 		type LeaveType,
 		type MonthlyRecapRow,
-		type HistoryRow
+		type HistoryRow,
+		type DailyReport,
+		type SubstituteReport,
+		type AnnualReport
 	} from '$lib/api';
 
 	// ------------------------------------------------------------------
@@ -587,6 +594,50 @@
 		}
 	}
 
+	// --- Admin membantu mengajukan cuti/izin atas nama guru -- LANGSUNG
+	// disetujui otomatis, tanpa perlu melalui alur pending->approve, untuk
+	// kondisi darurat/mendadak yang sudah dikomunikasikan langsung ke admin. ---
+	let showModalAjukanCutiAdmin = $state(false);
+	let newCutiAdmin = $state({ teacher_id: '', start_date: '', end_date: '', leave_type: '', reason: '' });
+	let cutiAdminFormError = $state('');
+
+	function openAjukanCutiAdmin() {
+		newCutiAdmin = {
+			teacher_id: '',
+			start_date: '',
+			end_date: '',
+			leave_type: leaveTypesAdmin[0]?.code ?? leaveTypes[0]?.code ?? '',
+			reason: ''
+		};
+		cutiAdminFormError = '';
+		showModalAjukanCutiAdmin = true;
+	}
+
+	async function handleAjukanCutiAdmin(e: Event) {
+		e.preventDefault();
+		cutiAdminFormError = '';
+		if (
+			!newCutiAdmin.teacher_id ||
+			!newCutiAdmin.start_date ||
+			!newCutiAdmin.end_date ||
+			!newCutiAdmin.leave_type ||
+			!newCutiAdmin.reason
+		) {
+			cutiAdminFormError = 'Semua field wajib diisi';
+			return;
+		}
+		try {
+			await adminCreateLeave({
+				...newCutiAdmin,
+				teacher_id: Number(newCutiAdmin.teacher_id)
+			});
+			showModalAjukanCutiAdmin = false;
+			await loadLeaves();
+		} catch (err) {
+			cutiAdminFormError = err instanceof Error ? err.message : 'Gagal mengajukan cuti untuk guru';
+		}
+	}
+
 	async function handleApprove(id: number) {
 		try {
 			await approveLeave(id);
@@ -713,9 +764,13 @@
 	}
 
 	// ------------------------------------------------------------------
-	// 6. Laporan (GET /api/admin/reports/monthly & /history)
+	// 6. Laporan (GET /api/admin/reports/monthly, /daily, /substitutes, /annual, /history)
 	// ------------------------------------------------------------------
 	const now = new Date();
+
+	// Sub-tab di dalam halaman Laporan: Bulanan / Harian / Guru Pengganti / Tahunan.
+	let reportSubTab = $state<'bulanan' | 'harian' | 'pengganti' | 'tahunan'>('bulanan');
+
 	let reportMonth = $state(now.getMonth() + 1);
 	let reportYear = $state(now.getFullYear());
 	let monthlyRecap = $state<MonthlyRecapRow[]>([]);
@@ -732,24 +787,203 @@
 		}
 	}
 
+	function downloadCSV(filename: string, header: string[], rows: (string | number)[][]) {
+		const csv = [header, ...rows]
+			.map((row) => row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+			.join('\n');
+		const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement('a');
+		a.href = url;
+		a.download = filename;
+		a.click();
+		URL.revokeObjectURL(url);
+	}
+
 	function exportReportCSV() {
-		const header = ['Nama Guru', 'Total Sesi', 'Tuntas', 'Tidak Tuntas', 'JP Aktual', 'JP Target'];
+		const header = [
+			'Nama Guru',
+			'Total Sesi',
+			'Tuntas',
+			'Tidak Tuntas',
+			'JP Aktual',
+			'JP Target',
+			'Sesi sbg Guru Pengganti',
+			'JP sbg Guru Pengganti',
+			'Sesi Digantikan',
+			'Jumlah Cuti'
+		];
 		const rows = monthlyRecap.map((r) => [
 			r.teacher_name,
 			r.total_sesi,
 			r.sesi_tuntas,
 			r.sesi_tidak_tuntas,
 			r.total_jp_aktual,
-			r.total_jp_target
+			r.total_jp_target,
+			r.sesi_sebagai_pengganti,
+			r.jp_sebagai_pengganti,
+			r.sesi_digantikan,
+			r.jumlah_cuti
 		]);
-		const csv = [header, ...rows].map((row) => row.join(',')).join('\n');
-		const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-		const url = URL.createObjectURL(blob);
-		const a = document.createElement('a');
-		a.href = url;
-		a.download = `rekap-${reportYear}-${String(reportMonth).padStart(2, '0')}.csv`;
-		a.click();
-		URL.revokeObjectURL(url);
+		downloadCSV(`rekap-bulanan-${reportYear}-${String(reportMonth).padStart(2, '0')}.csv`, header, rows);
+	}
+
+	// --- 6b. Laporan Absensi Harian: dari tanggal 1 s/d hari ini, start_day
+	// bisa digeser admin (dibatasi tetap di bulan yang sama oleh backend). ---
+	let dailyYear = $state(now.getFullYear());
+	let dailyMonth = $state(now.getMonth() + 1);
+	let dailyStartDay = $state(1);
+	let dailyReport = $state<DailyReport | null>(null);
+	let dailyLoading = $state(false);
+	let dailyError = $state('');
+
+	// Batas atas input tanggal mulai: jumlah hari di bulan yang dipilih.
+	function daysInSelectedDailyMonth() {
+		return new Date(dailyYear, dailyMonth, 0).getDate();
+	}
+
+	async function loadDailyReport() {
+		dailyLoading = true;
+		dailyError = '';
+		try {
+			dailyReport = await getDailyReport(dailyYear, dailyMonth, dailyStartDay);
+		} catch (err) {
+			dailyError = err instanceof Error ? err.message : 'Gagal memuat laporan harian';
+			dailyReport = null;
+		} finally {
+			dailyLoading = false;
+		}
+	}
+
+	function exportDailyReportCSV() {
+		if (!dailyReport) return;
+		const header = [
+			'Tanggal',
+			'Total Sesi',
+			'Tuntas',
+			'Tidak Tuntas',
+			'Berlangsung',
+			'Jumlah Guru Hadir',
+			'Sesi Digantikan',
+			'Total JP Aktual'
+		];
+		const rows = dailyReport.days.map((d) => [
+			d.date,
+			d.total_sesi,
+			d.sesi_tuntas,
+			d.sesi_tidak_tuntas,
+			d.sesi_berlangsung,
+			d.jumlah_guru_hadir,
+			d.sesi_digantikan,
+			d.total_jp_aktual
+		]);
+		downloadCSV(`absen-harian-${dailyReport.start_date}_sd_${dailyReport.end_date}.csv`, header, rows);
+	}
+
+	// --- 6c. Rekap sebagai Guru Pengganti (inval) -- tidak terikat target JP. ---
+	let subStart = $state(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`);
+	let subEnd = $state(now.toISOString().slice(0, 10));
+	let subTeacherId = $state('');
+	let subReport = $state<SubstituteReport | null>(null);
+	let subLoading = $state(false);
+
+	async function loadSubstituteReport() {
+		subLoading = true;
+		try {
+			subReport = await getSubstituteReport({
+				start: subStart || undefined,
+				end: subEnd || undefined,
+				teacher_id: subTeacherId ? Number(subTeacherId) : undefined
+			});
+		} catch (err) {
+			globalError = err instanceof Error ? err.message : 'Gagal memuat rekap guru pengganti';
+			subReport = null;
+		} finally {
+			subLoading = false;
+		}
+	}
+
+	function exportSubstituteReportCSV() {
+		if (!subReport) return;
+		const header = ['Tanggal', 'Guru Pengganti', 'Menggantikan', 'Ruangan', 'Jam Masuk', 'Jam Keluar', 'JP Aktual'];
+		const rows = subReport.sessions.map((s) => [
+			s.date,
+			s.substitute_name,
+			s.original_teacher_name,
+			s.room_name ?? '-',
+			s.clock_in ?? '-',
+			s.clock_out ?? '-',
+			s.actual_jp
+		]);
+		downloadCSV(`rekap-guru-pengganti-${subStart || 'semua'}_sd_${subEnd || 'semua'}.csv`, header, rows);
+	}
+
+	// --- 6d. Laporan Tahunan / Individu per guru: 12 bulan, dipakai untuk
+	// export CSV individu & melihat konsistensi kehadiran guru selama setahun. ---
+	let annualYear = $state(now.getFullYear());
+	let annualTeacherId = $state('');
+	let annualReport = $state<AnnualReport | null>(null);
+	let annualLoading = $state(false);
+
+	async function loadAnnualReport() {
+		if (!annualTeacherId) return;
+		annualLoading = true;
+		try {
+			annualReport = await getAnnualReport(annualYear, Number(annualTeacherId));
+		} catch (err) {
+			globalError = err instanceof Error ? err.message : 'Gagal memuat laporan tahunan';
+			annualReport = null;
+		} finally {
+			annualLoading = false;
+		}
+	}
+
+	// "Laporan CSV Individu": ringkasan setahun penuh untuk SATU guru --
+	// jadwal tetap, sebagai guru pengganti, jumlah cuti, dan status konsisten
+	// per bulan, siap dibuka di Excel/Sheets.
+	function exportAnnualReportCSV() {
+		if (!annualReport) return;
+		const header = [
+			'Bulan',
+			'Total Sesi',
+			'Tuntas',
+			'Tidak Tuntas',
+			'JP Aktual',
+			'JP Target',
+			'Sesi sbg Guru Pengganti',
+			'JP sbg Guru Pengganti',
+			'Jumlah Cuti',
+			'Konsisten'
+		];
+		const rows = annualReport.months.map((m) => [
+			m.month_name,
+			m.total_sesi,
+			m.sesi_tuntas,
+			m.sesi_tidak_tuntas,
+			m.jp_aktual,
+			m.jp_target,
+			m.sesi_sebagai_pengganti,
+			m.jp_sebagai_pengganti,
+			m.jumlah_cuti,
+			m.has_data ? (m.consistent ? 'Ya' : 'Tidak') : '-'
+		]);
+		rows.push([
+			'TOTAL SETAHUN',
+			annualReport.total_sesi,
+			annualReport.total_sesi_tuntas,
+			annualReport.total_sesi_tidak_tuntas,
+			annualReport.total_jp_aktual,
+			annualReport.total_jp_target,
+			annualReport.total_sesi_sebagai_pengganti,
+			annualReport.total_jp_sebagai_pengganti,
+			annualReport.total_jumlah_cuti,
+			annualReport.konsisten_setahun ? 'Ya' : 'Tidak'
+		]);
+		downloadCSV(
+			`laporan-individu-${annualReport.teacher_name.replace(/\s+/g, '_')}-${annualReport.year}.csv`,
+			header,
+			rows
+		);
 	}
 
 	// ------------------------------------------------------------------
@@ -1300,6 +1534,11 @@
 								class="bg-blue-900 text-white px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-blue-950 transition flex items-center gap-1.5 shadow-sm">
 								<span>📝</span> + Ajukan Cuti / Izin Baru
 							</button>
+						{:else}
+							<button type="button" onclick={openAjukanCutiAdmin}
+								class="bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-emerald-800 transition flex items-center gap-1.5 shadow-sm">
+								<span>✅</span> + Bantu Ajukan Cuti Guru (Auto-Setuju)
+							</button>
 						{/if}
 					</div>
 
@@ -1367,61 +1606,389 @@
 
 			<!-- TAB: LAPORAN REKAP -->
 			{:else if activeTab === 'laporan' && currentUser.role === 'admin'}
-				<div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-					<div class="p-6 border-b border-slate-200 bg-slate-50 flex flex-wrap justify-between items-center gap-3">
-						<div>
-							<h2 class="text-lg font-bold text-slate-800">Laporan Rekap Jam Mengajar</h2>
-							<p class="text-xs text-slate-500">Rekap perbandingan Jam Pelajaran (JP) target vs aktual per bulan.</p>
-						</div>
-						<div class="flex items-center gap-2">
-							<select bind:value={reportMonth} class="border border-slate-300 rounded-lg p-2 text-sm bg-white">
-								{#each Array(12) as _, i}
-									<option value={i + 1}>{new Date(2000, i, 1).toLocaleString('id-ID', { month: 'long' })}</option>
-								{/each}
-							</select>
-							<input type="number" bind:value={reportYear} class="border border-slate-300 rounded-lg p-2 text-sm w-24" />
-							<button type="button" onclick={loadMonthlyReport}
-								class="bg-slate-700 text-white px-3.5 py-2 rounded-lg text-xs font-bold cursor-pointer border-0 hover:bg-slate-800 transition">
-								Tampilkan
-							</button>
-							<button type="button" onclick={exportReportCSV} disabled={monthlyRecap.length === 0}
-								class="bg-blue-900 text-white px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-blue-950 flex items-center gap-1.5 shadow-sm disabled:opacity-50">
-								📥 Export CSV
-							</button>
-						</div>
+				<div class="space-y-4">
+					<!-- Sub-nav laporan -->
+					<div class="flex flex-wrap gap-2">
+						<button type="button" onclick={() => (reportSubTab = 'bulanan')}
+							class="px-4 py-2 rounded-lg text-sm font-bold cursor-pointer border-0 transition {reportSubTab === 'bulanan' ? 'bg-blue-900 text-white shadow-sm' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'}">
+							📊 Rekap Bulanan
+						</button>
+						<button type="button" onclick={() => { reportSubTab = 'harian'; if (!dailyReport) loadDailyReport(); }}
+							class="px-4 py-2 rounded-lg text-sm font-bold cursor-pointer border-0 transition {reportSubTab === 'harian' ? 'bg-blue-900 text-white shadow-sm' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'}">
+							📅 Absensi Harian
+						</button>
+						<button type="button" onclick={() => { reportSubTab = 'pengganti'; if (!subReport) loadSubstituteReport(); }}
+							class="px-4 py-2 rounded-lg text-sm font-bold cursor-pointer border-0 transition {reportSubTab === 'pengganti' ? 'bg-blue-900 text-white shadow-sm' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'}">
+							🔁 Rekap Guru Pengganti
+						</button>
+						<button type="button" onclick={() => (reportSubTab = 'tahunan')}
+							class="px-4 py-2 rounded-lg text-sm font-bold cursor-pointer border-0 transition {reportSubTab === 'tahunan' ? 'bg-blue-900 text-white shadow-sm' : 'bg-white text-slate-600 border border-slate-200 hover:bg-slate-50'}">
+							📆 Tahunan / Individu
+						</button>
 					</div>
-					<div class="p-6">
-						{#if reportLoading}
-							<p class="text-sm text-slate-400">Memuat...</p>
-						{:else if monthlyRecap.length === 0}
-							<p class="text-sm text-slate-400">Tidak ada data untuk periode ini.</p>
-						{:else}
-							<table class="w-full text-left text-sm border-collapse">
-								<thead>
-									<tr class="border-b border-slate-200 text-slate-500 text-xs uppercase font-bold bg-slate-50/50">
-										<th class="py-3 px-4">Nama Guru</th>
-										<th class="py-3 px-4 text-center">Total Sesi</th>
-										<th class="py-3 px-4 text-center">Tuntas</th>
-										<th class="py-3 px-4 text-center">Tidak Tuntas</th>
-										<th class="py-3 px-4 text-center">JP Aktual</th>
-										<th class="py-3 px-4 text-center">JP Target</th>
-									</tr>
-								</thead>
-								<tbody class="divide-y divide-slate-100">
-									{#each monthlyRecap as row}
-										<tr class="hover:bg-slate-50">
-											<td class="py-3.5 px-4 font-bold text-slate-800">{row.teacher_name}</td>
-											<td class="py-3.5 px-4 text-center text-slate-600">{row.total_sesi}</td>
-											<td class="py-3.5 px-4 text-center text-emerald-700 font-semibold">{row.sesi_tuntas}</td>
-											<td class="py-3.5 px-4 text-center text-rose-700 font-semibold">{row.sesi_tidak_tuntas}</td>
-											<td class="py-3.5 px-4 text-center font-mono">{row.total_jp_aktual}</td>
-											<td class="py-3.5 px-4 text-center font-mono">{row.total_jp_target}</td>
-										</tr>
-									{/each}
-								</tbody>
-							</table>
-						{/if}
-					</div>
+
+					<!-- ===== 6a. REKAP BULANAN ===== -->
+					{#if reportSubTab === 'bulanan'}
+						<div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+							<div class="p-6 border-b border-slate-200 bg-slate-50 flex flex-wrap justify-between items-center gap-3">
+								<div>
+									<h2 class="text-lg font-bold text-slate-800">Laporan Rekap Jam Mengajar</h2>
+									<p class="text-xs text-slate-500">Perbandingan JP target vs aktual per guru, plus info sebagai/digantikan guru pengganti & jumlah cuti bulan ini.</p>
+								</div>
+								<div class="flex items-center gap-2 flex-wrap">
+									<select bind:value={reportMonth} class="border border-slate-300 rounded-lg p-2 text-sm bg-white">
+										{#each Array(12) as _, i}
+											<option value={i + 1}>{new Date(2000, i, 1).toLocaleString('id-ID', { month: 'long' })}</option>
+										{/each}
+									</select>
+									<input type="number" bind:value={reportYear} class="border border-slate-300 rounded-lg p-2 text-sm w-24" />
+									<button type="button" onclick={loadMonthlyReport}
+										class="bg-slate-700 text-white px-3.5 py-2 rounded-lg text-xs font-bold cursor-pointer border-0 hover:bg-slate-800 transition">
+										Tampilkan
+									</button>
+									<button type="button" onclick={exportReportCSV} disabled={monthlyRecap.length === 0}
+										class="bg-blue-900 text-white px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-blue-950 flex items-center gap-1.5 shadow-sm disabled:opacity-50">
+										📥 Export CSV
+									</button>
+								</div>
+							</div>
+							<div class="p-6 overflow-x-auto">
+								{#if reportLoading}
+									<p class="text-sm text-slate-400">Memuat...</p>
+								{:else if monthlyRecap.length === 0}
+									<p class="text-sm text-slate-400">Tidak ada data untuk periode ini.</p>
+								{:else}
+									<table class="w-full text-left text-sm border-collapse">
+										<thead>
+											<tr class="border-b border-slate-200 text-slate-500 text-xs uppercase font-bold bg-slate-50/50">
+												<th class="py-3 px-4">Nama Guru</th>
+												<th class="py-3 px-4 text-center">Total Sesi</th>
+												<th class="py-3 px-4 text-center">Tuntas</th>
+												<th class="py-3 px-4 text-center">Tidak Tuntas</th>
+												<th class="py-3 px-4 text-center">JP Aktual</th>
+												<th class="py-3 px-4 text-center">JP Target</th>
+												<th class="py-3 px-4 text-center">🔁 Sbg Pengganti</th>
+												<th class="py-3 px-4 text-center">🔁 Digantikan</th>
+												<th class="py-3 px-4 text-center">🗓️ Cuti</th>
+											</tr>
+										</thead>
+										<tbody class="divide-y divide-slate-100">
+											{#each monthlyRecap as row}
+												<tr class="hover:bg-slate-50">
+													<td class="py-3.5 px-4 font-bold text-slate-800">
+														{row.teacher_name}
+														{#if row.teacher_role === 'guru_pengganti'}
+															<span class="ml-1.5 bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded text-[10px] font-bold align-middle">Guru Pengganti</span>
+														{/if}
+													</td>
+													<td class="py-3.5 px-4 text-center text-slate-600">{row.total_sesi}</td>
+													<td class="py-3.5 px-4 text-center text-emerald-700 font-semibold">{row.sesi_tuntas}</td>
+													<td class="py-3.5 px-4 text-center text-rose-700 font-semibold">{row.sesi_tidak_tuntas}</td>
+													<td class="py-3.5 px-4 text-center font-mono">{row.total_jp_aktual}</td>
+													<td class="py-3.5 px-4 text-center font-mono">{row.total_jp_target}</td>
+													<td class="py-3.5 px-4 text-center">
+														{#if row.sesi_sebagai_pengganti > 0}
+															<span class="text-purple-700 font-bold">{row.sesi_sebagai_pengganti}x</span>
+															<span class="block text-[10px] text-slate-400 font-mono">{row.jp_sebagai_pengganti} JP</span>
+														{:else}
+															<span class="text-slate-300">-</span>
+														{/if}
+													</td>
+													<td class="py-3.5 px-4 text-center">
+														{#if row.sesi_digantikan > 0}
+															<span class="text-amber-700 font-bold">{row.sesi_digantikan}x</span>
+														{:else}
+															<span class="text-slate-300">-</span>
+														{/if}
+													</td>
+													<td class="py-3.5 px-4 text-center">
+														{#if row.jumlah_cuti > 0}
+															<span class="text-blue-700 font-bold">{row.jumlah_cuti}x</span>
+														{:else}
+															<span class="text-slate-300">-</span>
+														{/if}
+													</td>
+												</tr>
+											{/each}
+										</tbody>
+									</table>
+								{/if}
+							</div>
+						</div>
+
+					<!-- ===== 6b. ABSENSI HARIAN ===== -->
+					{:else if reportSubTab === 'harian'}
+						<div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+							<div class="p-6 border-b border-slate-200 bg-slate-50 flex flex-wrap justify-between items-center gap-3">
+								<div>
+									<h2 class="text-lg font-bold text-slate-800">Laporan Absensi Harian</h2>
+									<p class="text-xs text-slate-500">Rekap per tanggal, dari tanggal 1 s/d hari ini. Tanggal mulai bisa digeser, asal masih di bulan yang sama.</p>
+								</div>
+								<div class="flex items-center gap-2 flex-wrap">
+									<select bind:value={dailyMonth} class="border border-slate-300 rounded-lg p-2 text-sm bg-white">
+										{#each Array(12) as _, i}
+											<option value={i + 1}>{new Date(2000, i, 1).toLocaleString('id-ID', { month: 'long' })}</option>
+										{/each}
+									</select>
+									<input type="number" bind:value={dailyYear} class="border border-slate-300 rounded-lg p-2 text-sm w-24" />
+									<div class="flex items-center gap-1">
+										<span class="text-xs text-slate-500 font-semibold">Mulai tgl</span>
+										<input type="number" min="1" max={daysInSelectedDailyMonth()} bind:value={dailyStartDay}
+											class="border border-slate-300 rounded-lg p-2 text-sm w-16" />
+									</div>
+									<button type="button" onclick={loadDailyReport}
+										class="bg-slate-700 text-white px-3.5 py-2 rounded-lg text-xs font-bold cursor-pointer border-0 hover:bg-slate-800 transition">
+										Tampilkan
+									</button>
+									<button type="button" onclick={exportDailyReportCSV} disabled={!dailyReport || dailyReport.days.length === 0}
+										class="bg-blue-900 text-white px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-blue-950 flex items-center gap-1.5 shadow-sm disabled:opacity-50">
+										📥 Export CSV
+									</button>
+								</div>
+							</div>
+							<div class="p-6 overflow-x-auto">
+								{#if dailyLoading}
+									<p class="text-sm text-slate-400">Memuat...</p>
+								{:else if dailyError}
+									<div class="bg-rose-50 border border-rose-200 text-rose-700 p-2.5 rounded-lg text-xs font-semibold">{dailyError}</div>
+								{:else if !dailyReport || dailyReport.days.length === 0}
+									<p class="text-sm text-slate-400">Tidak ada data untuk rentang ini.</p>
+								{:else}
+									<p class="text-xs text-slate-500 mb-3 font-semibold">
+										Menampilkan {dailyReport.start_date} s/d {dailyReport.end_date}
+									</p>
+									<table class="w-full text-left text-sm border-collapse">
+										<thead>
+											<tr class="border-b border-slate-200 text-slate-500 text-xs uppercase font-bold bg-slate-50/50">
+												<th class="py-3 px-4">Tanggal</th>
+												<th class="py-3 px-4 text-center">Total Sesi</th>
+												<th class="py-3 px-4 text-center">Tuntas</th>
+												<th class="py-3 px-4 text-center">Tidak Tuntas</th>
+												<th class="py-3 px-4 text-center">Berlangsung</th>
+												<th class="py-3 px-4 text-center">Guru Hadir</th>
+												<th class="py-3 px-4 text-center">Digantikan</th>
+												<th class="py-3 px-4 text-center">JP Aktual</th>
+											</tr>
+										</thead>
+										<tbody class="divide-y divide-slate-100">
+											{#each dailyReport.days as d}
+												<tr class="hover:bg-slate-50 {d.total_sesi === 0 ? 'opacity-50' : ''}">
+													<td class="py-3.5 px-4 font-bold text-slate-800">
+														{new Date(d.date).toLocaleDateString('id-ID', { weekday: 'short', day: '2-digit', month: 'short' })}
+													</td>
+													<td class="py-3.5 px-4 text-center text-slate-600">{d.total_sesi}</td>
+													<td class="py-3.5 px-4 text-center text-emerald-700 font-semibold">{d.sesi_tuntas}</td>
+													<td class="py-3.5 px-4 text-center text-rose-700 font-semibold">{d.sesi_tidak_tuntas}</td>
+													<td class="py-3.5 px-4 text-center text-amber-700 font-semibold">{d.sesi_berlangsung}</td>
+													<td class="py-3.5 px-4 text-center">{d.jumlah_guru_hadir}</td>
+													<td class="py-3.5 px-4 text-center">{d.sesi_digantikan}</td>
+													<td class="py-3.5 px-4 text-center font-mono">{d.total_jp_aktual}</td>
+												</tr>
+											{/each}
+										</tbody>
+									</table>
+								{/if}
+							</div>
+						</div>
+
+					<!-- ===== 6c. REKAP GURU PENGGANTI ===== -->
+					{:else if reportSubTab === 'pengganti'}
+						<div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+							<div class="p-6 border-b border-slate-200 bg-slate-50 flex flex-wrap justify-between items-center gap-3">
+								<div>
+									<h2 class="text-lg font-bold text-slate-800">Rekap sebagai Guru Pengganti</h2>
+									<p class="text-xs text-slate-500">Semua sesi inval (menggantikan guru lain). Tidak terikat target JP -- murni jumlah sesi & jam aktual mengajar.</p>
+								</div>
+								<div class="flex items-center gap-2 flex-wrap">
+									<input type="date" bind:value={subStart} class="border border-slate-300 rounded-lg p-2 text-sm" />
+									<span class="text-slate-400 text-xs">s/d</span>
+									<input type="date" bind:value={subEnd} class="border border-slate-300 rounded-lg p-2 text-sm" />
+									<select bind:value={subTeacherId} class="border border-slate-300 rounded-lg p-2 text-sm bg-white">
+										<option value="">Semua Guru</option>
+										{#each teachers as t}
+											<option value={t.id}>{t.name}</option>
+										{/each}
+									</select>
+									<button type="button" onclick={loadSubstituteReport}
+										class="bg-slate-700 text-white px-3.5 py-2 rounded-lg text-xs font-bold cursor-pointer border-0 hover:bg-slate-800 transition">
+										Tampilkan
+									</button>
+									<button type="button" onclick={exportSubstituteReportCSV} disabled={!subReport || subReport.sessions.length === 0}
+										class="bg-blue-900 text-white px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-blue-950 flex items-center gap-1.5 shadow-sm disabled:opacity-50">
+										📥 Export CSV
+									</button>
+								</div>
+							</div>
+							<div class="p-6 overflow-x-auto">
+								{#if subLoading}
+									<p class="text-sm text-slate-400">Memuat...</p>
+								{:else if !subReport || subReport.sessions.length === 0}
+									<p class="text-sm text-slate-400">Tidak ada sesi guru pengganti untuk rentang ini.</p>
+								{:else}
+									<div class="flex gap-4 mb-4">
+										<div class="bg-purple-50 border border-purple-200 rounded-lg px-4 py-2.5">
+											<p class="text-[10px] uppercase font-bold text-purple-500">Total Sesi</p>
+											<p class="text-lg font-black text-purple-800">{subReport.total_sesi}</p>
+										</div>
+										<div class="bg-purple-50 border border-purple-200 rounded-lg px-4 py-2.5">
+											<p class="text-[10px] uppercase font-bold text-purple-500">Total JP Aktual</p>
+											<p class="text-lg font-black text-purple-800">{subReport.total_jp}</p>
+										</div>
+									</div>
+									<table class="w-full text-left text-sm border-collapse">
+										<thead>
+											<tr class="border-b border-slate-200 text-slate-500 text-xs uppercase font-bold bg-slate-50/50">
+												<th class="py-3 px-4">Tanggal</th>
+												<th class="py-3 px-4">Guru Pengganti</th>
+												<th class="py-3 px-4">Menggantikan</th>
+												<th class="py-3 px-4">Ruangan</th>
+												<th class="py-3 px-4 text-center">Jam Masuk</th>
+												<th class="py-3 px-4 text-center">Jam Keluar</th>
+												<th class="py-3 px-4 text-center">JP Aktual</th>
+											</tr>
+										</thead>
+										<tbody class="divide-y divide-slate-100">
+											{#each subReport.sessions as s}
+												<tr class="hover:bg-slate-50">
+													<td class="py-3.5 px-4 text-slate-600">{s.date}</td>
+													<td class="py-3.5 px-4 font-bold text-purple-800">{s.substitute_name}</td>
+													<td class="py-3.5 px-4 text-slate-600">{s.original_teacher_name}</td>
+													<td class="py-3.5 px-4 text-slate-600">{s.room_name ?? '-'}</td>
+													<td class="py-3.5 px-4 text-center font-mono text-xs">{s.clock_in ? s.clock_in.slice(11, 16) : '-'}</td>
+													<td class="py-3.5 px-4 text-center font-mono text-xs">{s.clock_out ? s.clock_out.slice(11, 16) : '-'}</td>
+													<td class="py-3.5 px-4 text-center font-mono">{s.actual_jp}</td>
+												</tr>
+											{/each}
+										</tbody>
+									</table>
+								{/if}
+							</div>
+						</div>
+
+					<!-- ===== 6d. TAHUNAN / INDIVIDU ===== -->
+					{:else if reportSubTab === 'tahunan'}
+						<div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+							<div class="p-6 border-b border-slate-200 bg-slate-50 flex flex-wrap justify-between items-center gap-3">
+								<div>
+									<h2 class="text-lg font-bold text-slate-800">Laporan Tahunan / Individu</h2>
+									<p class="text-xs text-slate-500">Breakdown 12 bulan untuk 1 guru -- konsistensi kehadiran, jumlah cuti, dan aktivitas sebagai guru pengganti. Bisa diexport sebagai CSV individu.</p>
+								</div>
+								<div class="flex items-center gap-2 flex-wrap">
+									<select bind:value={annualTeacherId} class="border border-slate-300 rounded-lg p-2 text-sm bg-white min-w-[160px]">
+										<option value="">Pilih guru...</option>
+										{#each teachers as t}
+											<option value={t.id}>{t.name}</option>
+										{/each}
+									</select>
+									<input type="number" bind:value={annualYear} class="border border-slate-300 rounded-lg p-2 text-sm w-24" />
+									<button type="button" onclick={loadAnnualReport} disabled={!annualTeacherId}
+										class="bg-slate-700 text-white px-3.5 py-2 rounded-lg text-xs font-bold cursor-pointer border-0 hover:bg-slate-800 transition disabled:opacity-50">
+										Tampilkan
+									</button>
+									<button type="button" onclick={exportAnnualReportCSV} disabled={!annualReport}
+										class="bg-blue-900 text-white px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-blue-950 flex items-center gap-1.5 shadow-sm disabled:opacity-50">
+										📥 Export CSV Individu
+									</button>
+								</div>
+							</div>
+							<div class="p-6 overflow-x-auto">
+								{#if annualLoading}
+									<p class="text-sm text-slate-400">Memuat...</p>
+								{:else if !annualTeacherId}
+									<p class="text-sm text-slate-400">Pilih guru terlebih dahulu untuk melihat rekap tahunannya.</p>
+								{:else if !annualReport}
+									<p class="text-sm text-slate-400">Klik "Tampilkan" untuk memuat rekap.</p>
+								{:else}
+									<div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+										<div>
+											<h3 class="font-bold text-slate-800">
+												{annualReport.teacher_name}
+												{#if annualReport.teacher_role === 'guru_pengganti'}
+													<span class="ml-1.5 bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded text-[10px] font-bold align-middle">Guru Pengganti</span>
+												{/if}
+											</h3>
+											<p class="text-xs text-slate-500">Tahun {annualReport.year}</p>
+										</div>
+										{#if annualReport.konsisten_setahun}
+											<span class="bg-emerald-100 text-emerald-800 border border-emerald-300 px-3 py-1.5 rounded-full text-xs font-bold">✅ Konsisten selama setahun (tidak ada sesi tidak tuntas)</span>
+										{:else}
+											<span class="bg-amber-100 text-amber-800 border border-amber-300 px-3 py-1.5 rounded-full text-xs font-bold">⚠️ Ada {annualReport.total_sesi_tidak_tuntas} sesi tidak tuntas sepanjang tahun</span>
+										{/if}
+									</div>
+
+									<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-5">
+										<div class="bg-slate-50 border border-slate-200 rounded-lg px-4 py-2.5">
+											<p class="text-[10px] uppercase font-bold text-slate-400">Total Sesi Jadwal Tetap</p>
+											<p class="text-lg font-black text-slate-800">{annualReport.total_sesi}</p>
+										</div>
+										<div class="bg-purple-50 border border-purple-200 rounded-lg px-4 py-2.5">
+											<p class="text-[10px] uppercase font-bold text-purple-500">Sesi sbg Guru Pengganti</p>
+											<p class="text-lg font-black text-purple-800">{annualReport.total_sesi_sebagai_pengganti}</p>
+										</div>
+										<div class="bg-blue-50 border border-blue-200 rounded-lg px-4 py-2.5">
+											<p class="text-[10px] uppercase font-bold text-blue-500">Jumlah Cuti Setahun</p>
+											<p class="text-lg font-black text-blue-800">{annualReport.total_jumlah_cuti}x</p>
+										</div>
+										<div class="bg-emerald-50 border border-emerald-200 rounded-lg px-4 py-2.5">
+											<p class="text-[10px] uppercase font-bold text-emerald-600">Total JP Aktual</p>
+											<p class="text-lg font-black text-emerald-800">{annualReport.total_jp_aktual + annualReport.total_jp_sebagai_pengganti}</p>
+										</div>
+									</div>
+
+									<table class="w-full text-left text-sm border-collapse">
+										<thead>
+											<tr class="border-b border-slate-200 text-slate-500 text-xs uppercase font-bold bg-slate-50/50">
+												<th class="py-3 px-4">Bulan</th>
+												<th class="py-3 px-4 text-center">Sesi</th>
+												<th class="py-3 px-4 text-center">Tuntas</th>
+												<th class="py-3 px-4 text-center">Tdk Tuntas</th>
+												<th class="py-3 px-4 text-center">JP Aktual</th>
+												<th class="py-3 px-4 text-center">JP Target</th>
+												<th class="py-3 px-4 text-center">Sbg Pengganti</th>
+												<th class="py-3 px-4 text-center">Cuti</th>
+												<th class="py-3 px-4 text-center">Konsisten</th>
+											</tr>
+										</thead>
+										<tbody class="divide-y divide-slate-100">
+											{#each annualReport.months as m}
+												<tr class="hover:bg-slate-50 {!m.has_data ? 'opacity-40' : ''}">
+													<td class="py-3.5 px-4 font-bold text-slate-800">{m.month_name}</td>
+													<td class="py-3.5 px-4 text-center text-slate-600">{m.total_sesi}</td>
+													<td class="py-3.5 px-4 text-center text-emerald-700 font-semibold">{m.sesi_tuntas}</td>
+													<td class="py-3.5 px-4 text-center text-rose-700 font-semibold">{m.sesi_tidak_tuntas}</td>
+													<td class="py-3.5 px-4 text-center font-mono">{m.jp_aktual}</td>
+													<td class="py-3.5 px-4 text-center font-mono">{m.jp_target}</td>
+													<td class="py-3.5 px-4 text-center">
+														{#if m.sesi_sebagai_pengganti > 0}
+															<span class="text-purple-700 font-bold">{m.sesi_sebagai_pengganti}x</span>
+														{:else}
+															<span class="text-slate-300">-</span>
+														{/if}
+													</td>
+													<td class="py-3.5 px-4 text-center">
+														{#if m.jumlah_cuti > 0}
+															<span class="text-blue-700 font-bold">{m.jumlah_cuti}x</span>
+														{:else}
+															<span class="text-slate-300">-</span>
+														{/if}
+													</td>
+													<td class="py-3.5 px-4 text-center">
+														{#if !m.has_data}
+															<span class="text-slate-300">-</span>
+														{:else if m.consistent}
+															<span class="text-emerald-600">✅</span>
+														{:else}
+															<span class="text-rose-600">⚠️</span>
+														{/if}
+													</td>
+												</tr>
+											{/each}
+										</tbody>
+									</table>
+								{/if}
+							</div>
+						</div>
+					{/if}
 				</div>
 			{/if}
 
@@ -1538,6 +2105,73 @@
 				<div class="flex justify-end gap-2 pt-3 border-t border-slate-100">
 					<button type="button" onclick={() => (showModalAjukanCuti = false)} class="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-slate-200">Batal</button>
 					<button type="submit" class="px-4 py-2 bg-blue-900 text-white rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-blue-950">Kirim Permohonan</button>
+				</div>
+			</form>
+		</div>
+	</div>
+{/if}
+
+<!-- ================= MODAL BANTU AJUKAN CUTI GURU (ADMIN, AUTO-SETUJU) ================= -->
+{#if showModalAjukanCutiAdmin}
+	<div class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex justify-center items-center p-4 z-50">
+		<div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
+			<div class="bg-emerald-800 px-6 py-4 text-white flex justify-between items-center">
+				<h3 class="font-bold text-base">Bantu Ajukan Cuti untuk Guru</h3>
+				<button type="button" onclick={() => (showModalAjukanCutiAdmin = false)} class="text-emerald-200 hover:text-white border-0 bg-transparent text-xl font-bold cursor-pointer">✕</button>
+			</div>
+
+			<form onsubmit={handleAjukanCutiAdmin} class="p-6 space-y-4">
+				<div class="bg-emerald-50 border border-emerald-200 text-emerald-800 p-2.5 rounded-lg text-xs font-semibold">
+					ℹ️ Cuti yang diajukan lewat form ini akan LANGSUNG berstatus <b>Disetujui</b> begitu disimpan -- tidak melalui alur persetujuan pending. Gunakan untuk kondisi darurat/mendadak yang sudah dikoordinasikan langsung dengan guru bersangkutan.
+				</div>
+				{#if cutiAdminFormError}
+					<div class="bg-rose-50 border border-rose-200 text-rose-700 p-2.5 rounded-lg text-xs font-semibold">{cutiAdminFormError}</div>
+				{/if}
+
+				<div>
+					<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Guru</label>
+					{#if teachers.length === 0}
+						<p class="text-xs text-rose-600 font-semibold">Belum ada data guru. Tambahkan dulu di Data Master Guru.</p>
+					{:else}
+						<select bind:value={newCutiAdmin.teacher_id} required class="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-emerald-700 focus:outline-none bg-white">
+							<option value="" disabled>Pilih guru...</option>
+							{#each teachers as t}
+								<option value={t.id}>{t.name}</option>
+							{/each}
+						</select>
+					{/if}
+				</div>
+
+				<div class="grid grid-cols-2 gap-3">
+					<div>
+						<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Tanggal Mulai</label>
+						<input type="date" bind:value={newCutiAdmin.start_date} required class="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-emerald-700 focus:outline-none" />
+					</div>
+					<div>
+						<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Tanggal Selesai</label>
+						<input type="date" bind:value={newCutiAdmin.end_date} required class="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-emerald-700 focus:outline-none" />
+					</div>
+				</div>
+				<div>
+					<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Jenis</label>
+					{#if leaveTypesAdmin.length === 0 && leaveTypes.length === 0}
+						<p class="text-xs text-rose-600 font-semibold">Belum ada jenis cuti/izin. Tambahkan dulu di Master Data Cuti/Izin.</p>
+					{:else}
+						<select bind:value={newCutiAdmin.leave_type} required class="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-emerald-700 focus:outline-none bg-white">
+							{#each (leaveTypesAdmin.length > 0 ? leaveTypesAdmin : leaveTypes) as lt}
+								<option value={lt.code}>{lt.label}</option>
+							{/each}
+						</select>
+					{/if}
+				</div>
+				<div>
+					<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Alasan</label>
+					<textarea bind:value={newCutiAdmin.reason} required rows="3" class="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-emerald-700 focus:outline-none"></textarea>
+				</div>
+
+				<div class="flex justify-end gap-2 pt-3 border-t border-slate-100">
+					<button type="button" onclick={() => (showModalAjukanCutiAdmin = false)} class="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-slate-200">Batal</button>
+					<button type="submit" class="px-4 py-2 bg-emerald-800 text-white rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-emerald-900">✅ Simpan & Setujui</button>
 				</div>
 			</form>
 		</div>
