@@ -529,6 +529,75 @@
 		}
 	}
 
+	// --- Tampilan grid Jadwal Mengajar (kalender mingguan per jam) ---
+	let filterTeacherId = $state<number | ''>('');
+	let filterRoomId = $state<number | ''>('');
+
+	const filteredSchedules = $derived(
+		schedules.filter(
+			(s) =>
+				(filterTeacherId === '' || s.teacher_id === Number(filterTeacherId)) &&
+				(filterRoomId === '' || s.room_id === Number(filterRoomId))
+		)
+	);
+
+	function timeToHourFloat(t: string): number {
+		const [h, m] = t.split(':').map(Number);
+		return h + (m || 0) / 60;
+	}
+
+	// Rentang jam default 07:00-17:00, otomatis melebar kalau ada jadwal
+	// yang mulai lebih pagi atau berakhir lebih malam dari itu.
+	const GRID_DEFAULT_MIN_HOUR = 7;
+	const GRID_DEFAULT_MAX_HOUR = 17;
+
+	const gridHourRange = $derived.by(() => {
+		let minHour = GRID_DEFAULT_MIN_HOUR;
+		let maxHour = GRID_DEFAULT_MAX_HOUR;
+		for (const s of filteredSchedules) {
+			const startH = Math.floor(timeToHourFloat(s.start_time));
+			const endH = Math.min(23, Math.ceil(timeToHourFloat(s.end_time)));
+			if (startH < minHour) minHour = startH;
+			if (endH > maxHour) maxHour = endH;
+		}
+		const hours: number[] = [];
+		for (let h = minHour; h < maxHour; h++) hours.push(h);
+		return hours;
+	});
+
+	// Palet warna per guru (dipilih berdasarkan teacher_id supaya konsisten
+	// di grid maupun legend selama sesi ini).
+	const TEACHER_COLORS = [
+		{ bg: 'bg-blue-600', hex: '#2563eb' },
+		{ bg: 'bg-rose-500', hex: '#f43f5e' },
+		{ bg: 'bg-emerald-600', hex: '#059669' },
+		{ bg: 'bg-amber-500', hex: '#f59e0b' },
+		{ bg: 'bg-purple-600', hex: '#9333ea' },
+		{ bg: 'bg-cyan-600', hex: '#0891b2' },
+		{ bg: 'bg-orange-600', hex: '#ea580c' },
+		{ bg: 'bg-pink-600', hex: '#db2777' },
+		{ bg: 'bg-lime-600', hex: '#65a30d' },
+		{ bg: 'bg-indigo-600', hex: '#4f46e5' }
+	];
+
+	function teacherColor(teacherId: number) {
+		return TEACHER_COLORS[teacherId % TEACHER_COLORS.length];
+	}
+
+	// Legend di bawah grid: setiap guru yang tampil di grid + total JP
+	// mengajarnya minggu ini (jumlah target_jp seluruh jadwalnya).
+	const teacherLegend = $derived.by(() => {
+		const map = new Map<number, { name: string; jp: number }>();
+		for (const s of filteredSchedules) {
+			const cur = map.get(s.teacher_id) ?? { name: s.teacher_name, jp: 0 };
+			cur.jp += s.target_jp;
+			map.set(s.teacher_id, cur);
+		}
+		return Array.from(map.entries())
+			.map(([teacher_id, v]) => ({ teacher_id, ...v }))
+			.sort((a, b) => a.name.localeCompare(b.name));
+	});
+
 	// ------------------------------------------------------------------
 	// 5. Cuti / Izin (GET/POST /api/leaves, /api/admin/leaves, approve/reject)
 	// ------------------------------------------------------------------
@@ -1409,57 +1478,101 @@
 			<!-- TAB: JADWAL MENGAJAR -->
 			{:else if activeTab === 'jadwal' && currentUser.role === 'admin'}
 				<div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-					<div class="p-6 border-b border-slate-200 bg-slate-50 flex justify-between items-center">
+					<div class="p-6 border-b border-slate-200 bg-slate-50 flex flex-wrap justify-between items-center gap-3">
 						<div>
 							<h2 class="text-lg font-bold text-slate-800">Jadwal Mengajar Guru</h2>
-							<p class="text-xs text-slate-500">Jadwal per guru, ruangan, hari, dan Jam Pelajaran (JP) target.</p>
+							<p class="text-xs text-slate-500">Jadwal per guru, ruangan, hari, dan Jam Pelajaran (JP) target. Isi blok: Ruangan - Mapel - Guru.</p>
 						</div>
-						<button type="button" onclick={() => (showModalJadwal = true)}
-							class="bg-blue-900 text-white px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-blue-950 transition flex items-center gap-1.5 shadow-sm">
-							<span>+</span> Tambah Jadwal
-						</button>
+						<div class="flex items-center gap-2 flex-wrap">
+							<div class="relative">
+								<select bind:value={filterTeacherId}
+									class="appearance-none bg-blue-900 text-white pl-3.5 pr-7 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-blue-950 transition">
+									<option value="">Guru ▾ (Semua)</option>
+									{#each teachers.filter((t) => t.role === 'guru') as t}
+										<option value={t.id}>{t.name}</option>
+									{/each}
+								</select>
+								<span class="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-white text-[10px]">▾</span>
+							</div>
+							<div class="relative">
+								<select bind:value={filterRoomId}
+									class="appearance-none bg-blue-900 text-white pl-3.5 pr-7 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-blue-950 transition">
+									<option value="">Room ▾ (Semua)</option>
+									{#each rooms as r}
+										<option value={r.id}>{r.name}</option>
+									{/each}
+								</select>
+								<span class="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-white text-[10px]">▾</span>
+							</div>
+							<button type="button" onclick={() => (showModalJadwal = true)}
+								class="bg-slate-800 text-white px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-slate-900 transition flex items-center gap-1.5 shadow-sm">
+								<span>+</span> Tambah Jadwal
+							</button>
+						</div>
 					</div>
 					<div class="p-6">
 						{#if schedulesLoading}
 							<p class="text-sm text-slate-400">Memuat...</p>
+						{:else if filteredSchedules.length === 0}
+							<p class="text-sm text-slate-400">Tidak ada jadwal yang cocok dengan filter ini.</p>
 						{:else}
-							<table class="w-full text-left text-sm border-collapse">
-								<thead>
-									<tr class="border-b border-slate-200 text-slate-500 text-xs uppercase font-bold bg-slate-50/50">
-										<th class="py-3 px-4">Hari</th>
-										<th class="py-3 px-4">Guru</th>
-										<th class="py-3 px-4">Ruangan</th>
-										<th class="py-3 px-4">Jam</th>
-										<th class="py-3 px-4">Target JP</th>
-										<th class="py-3 px-4">Mapel</th>
-										<th class="py-3 px-4 text-right">Aksi</th>
-									</tr>
-								</thead>
-								<tbody class="divide-y divide-slate-100">
-									{#each schedules as s}
-										<tr class="hover:bg-slate-50">
-											<td class="py-3.5 px-4 font-semibold text-slate-800">{DAY_NAMES[s.day_of_week]}</td>
-											<td class="py-3.5 px-4 text-slate-700">{s.teacher_name}</td>
-											<td class="py-3.5 px-4 text-slate-600">{s.room_name}</td>
-											<td class="py-3.5 px-4 font-mono text-xs text-slate-600">{s.start_time} - {s.end_time}</td>
-											<td class="py-3.5 px-4 text-slate-600">{s.target_jp} JP</td>
-											<td class="py-3.5 px-4 text-slate-600">{s.subject ?? '-'}</td>
-											<td class="py-3.5 px-4 text-right">
-												<div class="flex justify-end gap-2">
-													<button type="button" onclick={() => openEditJadwal(s)}
-														class="bg-slate-200 text-slate-700 px-3 py-1 rounded text-xs font-bold cursor-pointer border-0 hover:bg-slate-300 transition">
-														✏️ Edit
-													</button>
-													<button type="button" onclick={() => handleDeleteJadwal(s)}
-														class="bg-rose-100 text-rose-700 px-3 py-1 rounded text-xs font-bold cursor-pointer border-0 hover:bg-rose-200 transition">
-														🗑️
-													</button>
-												</div>
-											</td>
-										</tr>
+							<div class="overflow-x-auto pb-2">
+								<div
+									class="grid text-xs border border-slate-200 rounded-lg overflow-hidden min-w-[760px]"
+									style="grid-template-columns: 64px repeat(7, minmax(104px, 1fr)); grid-template-rows: 36px repeat({gridHourRange.length}, 52px);"
+								>
+									<!-- Header -->
+									<div class="bg-slate-100 border-b border-r border-slate-200 flex items-center justify-center font-bold text-slate-500" style="grid-row:1; grid-column:1;">Jam</div>
+									{#each DAY_NAMES.slice(1) as dayName, dayIdx}
+										<div class="bg-slate-100 border-b border-r border-slate-200 last:border-r-0 flex items-center justify-center font-bold text-slate-600" style="grid-row:1; grid-column:{dayIdx + 2};">
+											{dayName}
+										</div>
 									{/each}
-								</tbody>
-							</table>
+
+									<!-- Sel kosong (garis grid per jam) -->
+									{#each gridHourRange as hour, rowIdx}
+										<div class="border-b border-r border-slate-200 flex items-start justify-center pt-1 font-bold text-slate-400 bg-slate-50/60" style="grid-row:{rowIdx + 2}; grid-column:1;">
+											{hour}
+										</div>
+										{#each Array(7) as _, dayIdx}
+											<div class="border-b border-r border-slate-100 last:border-r-0" style="grid-row:{rowIdx + 2}; grid-column:{dayIdx + 2};"></div>
+										{/each}
+									{/each}
+
+									<!-- Blok jadwal -->
+									{#each filteredSchedules as s (s.id)}
+										{@const startH = Math.floor(timeToHourFloat(s.start_time))}
+										{@const endH = Math.max(startH + 1, Math.ceil(timeToHourFloat(s.end_time)))}
+										{@const rowIdx = gridHourRange.indexOf(startH)}
+										{@const rowSpan = Math.min(endH, gridHourRange[gridHourRange.length - 1] + 1) - startH}
+										{@const color = teacherColor(s.teacher_id)}
+										{#if rowIdx >= 0}
+											<button
+												type="button"
+												onclick={() => openEditJadwal(s)}
+												title="{s.room_name} - {s.subject || '-'} - {s.teacher_name} ({s.start_time}-{s.end_time}, {s.target_jp} JP)"
+												class="{color.bg} text-white rounded-md m-0.5 p-1.5 text-left text-[10px] leading-tight overflow-hidden cursor-pointer hover:opacity-90 transition border-0 flex flex-col"
+												style="grid-row: {rowIdx + 2} / span {rowSpan}; grid-column: {s.day_of_week + 1};"
+											>
+												<span class="font-bold truncate">{s.room_name}</span>
+												<span class="truncate opacity-90">{s.subject || '-'}</span>
+												<span class="truncate opacity-90">{s.teacher_name}</span>
+											</button>
+										{/if}
+									{/each}
+								</div>
+							</div>
+
+							<!-- Legend: total JP mengajar per guru yang tampil di grid ini -->
+							{#if teacherLegend.length > 0}
+								<div class="flex flex-wrap gap-2 mt-5">
+									{#each teacherLegend as t}
+										<span class="{teacherColor(t.teacher_id).bg} text-white text-xs font-bold px-3 py-1.5 rounded-lg">
+											{t.name} = {t.jp} JP
+										</span>
+									{/each}
+								</div>
+							{/if}
 						{/if}
 					</div>
 				</div>
@@ -2588,9 +2701,13 @@
 					<input type="text" bind:value={editJadwal.subject} class="w-full border border-slate-300 rounded-lg p-2.5 text-sm" />
 				</div>
 
-				<div class="flex justify-end gap-2 pt-3 border-t border-slate-100">
-					<button type="button" onclick={() => (showModalEditJadwal = false)} class="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-slate-200">Batal</button>
-					<button type="submit" class="px-4 py-2 bg-blue-900 text-white rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-blue-950">Simpan Perubahan</button>
+				<div class="flex justify-between items-center gap-2 pt-3 border-t border-slate-100">
+					<button type="button" onclick={() => { showModalEditJadwal = false; if (editJadwalId !== null) { const s = schedules.find((sc) => sc.id === editJadwalId); if (s) handleDeleteJadwal(s); } }}
+						class="px-4 py-2 bg-rose-100 text-rose-700 rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-rose-200">🗑️ Hapus</button>
+					<div class="flex gap-2">
+						<button type="button" onclick={() => (showModalEditJadwal = false)} class="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-slate-200">Batal</button>
+						<button type="submit" class="px-4 py-2 bg-blue-900 text-white rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-blue-950">Simpan Perubahan</button>
+					</div>
 				</div>
 			</form>
 		</div>
