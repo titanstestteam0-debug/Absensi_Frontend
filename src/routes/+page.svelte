@@ -430,27 +430,33 @@
 	let scheduleYear = $state(now.getFullYear());
 	let schedulePeriods = $state<SchedulePeriod[]>([]);
 
+	const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+
 	function monthName(m: number) {
 		return new Date(2000, m - 1, 1).toLocaleString('id-ID', { month: 'long' });
 	}
 
-	// Pilihan bulan di dropdown filter: 12 bulan ke belakang s/d 6 bulan ke
-	// depan dari hari ini, digabung dengan periode manapun yang sudah punya
-	// data jadwal (jaga-jaga kalau di luar rentang itu).
-	const monthYearOptions = $derived.by(() => {
-		const opts: { month: number; year: number }[] = [];
-		for (let offset = -12; offset <= 6; offset++) {
-			const d = new Date(now.getFullYear(), now.getMonth() + offset, 1);
-			opts.push({ month: d.getMonth() + 1, year: d.getFullYear() });
-		}
-		for (const p of schedulePeriods) {
-			if (!opts.some((o) => o.month === p.month && o.year === p.year)) {
-				opts.push({ month: p.month, year: p.year });
-			}
-		}
-		opts.sort((a, b) => (a.year !== b.year ? b.year - a.year : b.month - a.month));
-		return opts;
-	});
+	// --- Popup pemilih Bulan/Tahun (gaya kalender: navigasi tahun + grid 12 bulan) ---
+	let showMonthPicker = $state(false);
+	let pickerYear = $state(now.getFullYear());
+
+	function openMonthPicker() {
+		pickerYear = scheduleYear;
+		showMonthPicker = true;
+	}
+
+	function selectPeriod(month: number, year: number) {
+		scheduleMonth = month;
+		scheduleYear = year;
+		showMonthPicker = false;
+		loadSchedules();
+	}
+
+	// Bulan-tahun yang sudah punya data jadwal tersimpan (ditandai titik kecil
+	// di grid popup), termasuk riwayat lama.
+	function periodHasData(month: number, year: number) {
+		return schedulePeriods.some((p) => p.month === month && p.year === year);
+	}
 
 	async function loadSchedules() {
 		schedulesLoading = true;
@@ -467,15 +473,8 @@
 		try {
 			schedulePeriods = (await listSchedulePeriods()) || [];
 		} catch {
-			// non-fatal -- dropdown filter tetap jalan pakai rentang default kalau ini gagal
+			// non-fatal -- filter bulan tetap jalan meski daftar riwayat ini gagal dimuat
 		}
-	}
-
-	function handleScheduleMonthChange(value: string) {
-		const [y, m] = value.split('-').map(Number);
-		scheduleYear = y;
-		scheduleMonth = m;
-		loadSchedules();
 	}
 
 	let showModalJadwal = $state(false);
@@ -1581,15 +1580,48 @@
 						</div>
 						<div class="flex items-center gap-2 flex-wrap">
 							<div class="relative">
-								<select
-									value={`${scheduleYear}-${scheduleMonth}`}
-									onchange={(e) => handleScheduleMonthChange((e.currentTarget as HTMLSelectElement).value)}
-									class="appearance-none bg-emerald-700 text-white pl-3.5 pr-7 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-emerald-800 transition">
-									{#each monthYearOptions as opt}
-										<option value={`${opt.year}-${opt.month}`}>{monthName(opt.month)} {opt.year}</option>
-									{/each}
-								</select>
-								<span class="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-white text-[10px]">▾</span>
+								<button type="button" onclick={openMonthPicker}
+									class="bg-emerald-700 text-white pl-3.5 pr-3 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-emerald-800 transition flex items-center gap-1.5">
+									{monthName(scheduleMonth)} {scheduleYear}
+									<span class="text-[10px]">▾</span>
+								</button>
+
+								{#if showMonthPicker}
+									<!-- Backdrop transparan buat nutup popup kalau klik di luar -->
+									<button type="button" aria-label="Tutup pemilih bulan" onclick={() => (showMonthPicker = false)}
+										class="fixed inset-0 z-40 bg-transparent border-0 cursor-default p-0"></button>
+
+									<div class="absolute left-0 top-full mt-2 z-50 w-64 bg-slate-900 text-white rounded-2xl shadow-2xl border border-slate-700 p-4">
+										<div class="flex items-center justify-between mb-3">
+											<p class="font-bold text-base">{pickerYear}</p>
+											<div class="flex flex-col -my-1">
+												<button type="button" onclick={() => (pickerYear += 1)}
+													class="text-slate-300 hover:text-white bg-transparent border-0 cursor-pointer px-1 leading-none text-xs">▲</button>
+												<button type="button" onclick={() => (pickerYear -= 1)}
+													class="text-slate-300 hover:text-white bg-transparent border-0 cursor-pointer px-1 leading-none text-xs">▼</button>
+											</div>
+										</div>
+										<div class="grid grid-cols-3 gap-2">
+											{#each MONTH_ABBR as abbr, idx}
+												{@const m = idx + 1}
+												{@const isSelected = m === scheduleMonth && pickerYear === scheduleYear}
+												{@const isCurrent = m === now.getMonth() + 1 && pickerYear === now.getFullYear()}
+												<button
+													type="button"
+													onclick={() => selectPeriod(m, pickerYear)}
+													class="relative rounded-full py-2 text-xs font-semibold border-0 cursor-pointer transition
+														{isSelected ? 'bg-purple-500 text-white' : 'bg-transparent text-slate-200 hover:bg-slate-800'}
+														{isCurrent && !isSelected ? 'ring-1 ring-slate-500' : ''}"
+												>
+													{abbr}
+													{#if periodHasData(m, pickerYear)}
+														<span class="absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full {isSelected ? 'bg-white' : 'bg-emerald-400'}"></span>
+													{/if}
+												</button>
+											{/each}
+										</div>
+									</div>
+								{/if}
 							</div>
 							<div class="relative">
 								<select bind:value={filterTeacherId}
