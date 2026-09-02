@@ -437,11 +437,21 @@
 	}
 
 	// --- Popup pemilih Bulan/Tahun (gaya kalender: navigasi tahun + grid 12 bulan) ---
+	// Posisi dihitung manual (bukan CSS absolute biasa) dan popup dirender di
+	// luar kartu jadwal (lihat markup di bawah), karena kartu jadwal pakai
+	// overflow-hidden untuk sudut membulat -- itu ikut memotong popup kalau
+	// dibiarkan jadi anak langsung di dalam kartu.
 	let showMonthPicker = $state(false);
 	let pickerYear = $state(now.getFullYear());
+	let monthPickerBtn = $state<HTMLButtonElement | null>(null);
+	let pickerPos = $state({ top: 0, left: 0 });
 
 	function openMonthPicker() {
 		pickerYear = scheduleYear;
+		if (monthPickerBtn) {
+			const rect = monthPickerBtn.getBoundingClientRect();
+			pickerPos = { top: rect.bottom + 8, left: rect.left };
+		}
 		showMonthPicker = true;
 	}
 
@@ -1579,50 +1589,11 @@
 							<p class="text-xs text-slate-500">Jadwal per guru, ruangan, hari, dan Jam Pelajaran (JP) target. Isi blok: Ruangan - Mapel - Guru.</p>
 						</div>
 						<div class="flex items-center gap-2 flex-wrap">
-							<div class="relative">
-								<button type="button" onclick={openMonthPicker}
-									class="bg-emerald-700 text-white pl-3.5 pr-3 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-emerald-800 transition flex items-center gap-1.5">
-									{monthName(scheduleMonth)} {scheduleYear}
-									<span class="text-[10px]">▾</span>
-								</button>
-
-								{#if showMonthPicker}
-									<!-- Backdrop transparan buat nutup popup kalau klik di luar -->
-									<button type="button" aria-label="Tutup pemilih bulan" onclick={() => (showMonthPicker = false)}
-										class="fixed inset-0 z-40 bg-transparent border-0 cursor-default p-0"></button>
-
-									<div class="absolute left-0 top-full mt-2 z-50 w-64 bg-slate-900 text-white rounded-2xl shadow-2xl border border-slate-700 p-4">
-										<div class="flex items-center justify-between mb-3">
-											<p class="font-bold text-base">{pickerYear}</p>
-											<div class="flex flex-col -my-1">
-												<button type="button" onclick={() => (pickerYear += 1)}
-													class="text-slate-300 hover:text-white bg-transparent border-0 cursor-pointer px-1 leading-none text-xs">▲</button>
-												<button type="button" onclick={() => (pickerYear -= 1)}
-													class="text-slate-300 hover:text-white bg-transparent border-0 cursor-pointer px-1 leading-none text-xs">▼</button>
-											</div>
-										</div>
-										<div class="grid grid-cols-3 gap-2">
-											{#each MONTH_ABBR as abbr, idx}
-												{@const m = idx + 1}
-												{@const isSelected = m === scheduleMonth && pickerYear === scheduleYear}
-												{@const isCurrent = m === now.getMonth() + 1 && pickerYear === now.getFullYear()}
-												<button
-													type="button"
-													onclick={() => selectPeriod(m, pickerYear)}
-													class="relative rounded-full py-2 text-xs font-semibold border-0 cursor-pointer transition
-														{isSelected ? 'bg-purple-500 text-white' : 'bg-transparent text-slate-200 hover:bg-slate-800'}
-														{isCurrent && !isSelected ? 'ring-1 ring-slate-500' : ''}"
-												>
-													{abbr}
-													{#if periodHasData(m, pickerYear)}
-														<span class="absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full {isSelected ? 'bg-white' : 'bg-emerald-400'}"></span>
-													{/if}
-												</button>
-											{/each}
-										</div>
-									</div>
-								{/if}
-							</div>
+							<button type="button" bind:this={monthPickerBtn} onclick={openMonthPicker}
+								class="bg-emerald-700 text-white pl-3.5 pr-3 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-emerald-800 transition flex items-center gap-1.5">
+								{monthName(scheduleMonth)} {scheduleYear}
+								<span class="text-[10px]">▾</span>
+							</button>
 							<div class="relative">
 								<select bind:value={filterTeacherId}
 									class="appearance-none bg-blue-900 text-white pl-3.5 pr-7 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-blue-950 transition">
@@ -1720,6 +1691,46 @@
 						{/if}
 					</div>
 				</div>
+
+				<!-- Popup pemilih Bulan sengaja di luar kartu di atas (yang overflow-hidden
+				     buat sudut membulat) supaya popup tidak ikut terpotong. Posisi dihitung
+				     manual dari tombol trigger (lihat openMonthPicker). -->
+				{#if showMonthPicker}
+					<button type="button" aria-label="Tutup pemilih bulan" onclick={() => (showMonthPicker = false)}
+						class="fixed inset-0 z-40 bg-transparent border-0 cursor-default p-0"></button>
+
+					<div class="fixed z-50 w-64 bg-slate-900 text-white rounded-2xl shadow-2xl border border-slate-700 p-4"
+						style="top: {pickerPos.top}px; left: {pickerPos.left}px;">
+						<div class="flex items-center justify-between mb-3">
+							<p class="font-bold text-base">{pickerYear}</p>
+							<div class="flex flex-col -my-1">
+								<button type="button" onclick={() => (pickerYear += 1)}
+									class="text-slate-300 hover:text-white bg-transparent border-0 cursor-pointer px-1 leading-none text-xs">▲</button>
+								<button type="button" onclick={() => (pickerYear -= 1)}
+									class="text-slate-300 hover:text-white bg-transparent border-0 cursor-pointer px-1 leading-none text-xs">▼</button>
+							</div>
+						</div>
+						<div class="grid grid-cols-3 gap-2">
+							{#each MONTH_ABBR as abbr, idx}
+								{@const m = idx + 1}
+								{@const isSelected = m === scheduleMonth && pickerYear === scheduleYear}
+								{@const isCurrent = m === now.getMonth() + 1 && pickerYear === now.getFullYear()}
+								<button
+									type="button"
+									onclick={() => selectPeriod(m, pickerYear)}
+									class="relative rounded-full py-2 text-xs font-semibold border-0 cursor-pointer transition
+										{isSelected ? 'bg-purple-500 text-white' : 'bg-transparent text-slate-200 hover:bg-slate-800'}
+										{isCurrent && !isSelected ? 'ring-1 ring-slate-500' : ''}"
+								>
+									{abbr}
+									{#if periodHasData(m, pickerYear)}
+										<span class="absolute bottom-0.5 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full {isSelected ? 'bg-white' : 'bg-emerald-400'}"></span>
+									{/if}
+								</button>
+							{/each}
+						</div>
+					</div>
+				{/if}
 
 			<!-- TAB: MASTER DATA JENIS CUTI/IZIN -->
 			{:else if activeTab === 'jenis-cuti' && currentUser.role === 'admin'}
