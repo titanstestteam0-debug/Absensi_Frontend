@@ -198,7 +198,8 @@ export const refreshRoomQR = (id: number) =>
 	request<RoomQR>(`/admin/rooms/${id}/refresh-qr`, { method: 'POST' });
 
 // ------------------------------------------------------------------
-// Schedules (Admin)
+// Schedules (Admin) -- terikat bulan/periode: tiap bulan bisa punya
+// susunan jadwal berbeda, riwayat bulan lama tetap tersimpan.
 // ------------------------------------------------------------------
 export interface Schedule {
 	id: number;
@@ -207,6 +208,8 @@ export interface Schedule {
 	room_id: number;
 	room_name: string;
 	day_of_week: number; // 1=Senin ... 7=Minggu
+	period_month: number; // 1-12
+	period_year: number;
 	start_time: string;
 	end_time: string;
 	target_jp: number;
@@ -214,12 +217,30 @@ export interface Schedule {
 	is_active: boolean;
 }
 
-export const listSchedules = () => request<Schedule[]>('/admin/schedules');
+// Tanpa month/year, backend default menampilkan bulan berjalan.
+export const listSchedules = (month?: number, year?: number) => {
+	const qs = new URLSearchParams();
+	if (month) qs.set('month', String(month));
+	if (year) qs.set('year', String(year));
+	const suffix = qs.toString() ? `?${qs.toString()}` : '';
+	return request<Schedule[]>(`/admin/schedules${suffix}`);
+};
+
+export interface SchedulePeriod {
+	year: number;
+	month: number;
+}
+
+// Daftar bulan-tahun yang punya jadwal tersimpan -- dipakai mengisi pilihan
+// filter "Bulan" (selalu menyertakan bulan berjalan meski belum ada isinya).
+export const listSchedulePeriods = () => request<SchedulePeriod[]>('/admin/schedules/periods');
 
 export const createSchedule = (payload: {
 	teacher_id: number;
 	room_id: number;
 	day_of_week: number;
+	period_month?: number;
+	period_year?: number;
 	start_time: string;
 	end_time: string;
 	target_jp: number;
@@ -232,6 +253,8 @@ export const updateSchedule = (
 		teacher_id: number;
 		room_id: number;
 		day_of_week: number;
+		period_month?: number;
+		period_year?: number;
 		start_time: string;
 		end_time: string;
 		target_jp: number;
@@ -241,6 +264,14 @@ export const updateSchedule = (
 
 export const deleteSchedule = (id: number) =>
 	request<null>(`/admin/schedules/${id}`, { method: 'DELETE' });
+
+// Duplikasi 1 jadwal ke bulan/periode lain, supaya admin tidak perlu input
+// ulang dari nol tiap bulan baru kalau susunannya sama/mirip.
+export const duplicateSchedule = (id: number, periodMonth: number, periodYear: number) =>
+	request<{ id: number }>(`/admin/schedules/${id}/duplicate`, {
+		method: 'POST',
+		body: { period_month: periodMonth, period_year: periodYear }
+	});
 
 // ------------------------------------------------------------------
 // Leaves / Cuti

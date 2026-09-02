@@ -17,9 +17,11 @@
 		getRoomQR,
 		refreshRoomQR,
 		listSchedules,
+		listSchedulePeriods,
 		createSchedule,
 		updateSchedule,
 		deleteSchedule,
+		duplicateSchedule,
 		listAllLeaves,
 		listMyLeaves,
 		createLeave,
@@ -40,6 +42,7 @@
 		type Teacher,
 		type Room,
 		type Schedule,
+		type SchedulePeriod,
 		type Leave,
 		type LeaveType,
 		type MonthlyRecapRow,
@@ -62,6 +65,7 @@
 	let globalError = $state('');
 
 	const DAY_NAMES = ['', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu', 'Minggu'];
+	const now = new Date();
 
 	async function handleLogin(e: Event) {
 		e.preventDefault();
@@ -419,11 +423,68 @@
 	// ------------------------------------------------------------------
 	let schedules = $state<Schedule[]>([]);
 	let schedulesLoading = $state(false);
+
+	// --- Filter Bulan: jadwal sekarang terikat periode (bulan/tahun), tiap
+	// bulan bisa punya susunan berbeda, riwayat bulan lama tetap tersimpan. ---
+	let scheduleMonth = $state(now.getMonth() + 1);
+	let scheduleYear = $state(now.getFullYear());
+	let schedulePeriods = $state<SchedulePeriod[]>([]);
+
+	function monthName(m: number) {
+		return new Date(2000, m - 1, 1).toLocaleString('id-ID', { month: 'long' });
+	}
+
+	// Pilihan bulan di dropdown filter: 12 bulan ke belakang s/d 6 bulan ke
+	// depan dari hari ini, digabung dengan periode manapun yang sudah punya
+	// data jadwal (jaga-jaga kalau di luar rentang itu).
+	const monthYearOptions = $derived.by(() => {
+		const opts: { month: number; year: number }[] = [];
+		for (let offset = -12; offset <= 6; offset++) {
+			const d = new Date(now.getFullYear(), now.getMonth() + offset, 1);
+			opts.push({ month: d.getMonth() + 1, year: d.getFullYear() });
+		}
+		for (const p of schedulePeriods) {
+			if (!opts.some((o) => o.month === p.month && o.year === p.year)) {
+				opts.push({ month: p.month, year: p.year });
+			}
+		}
+		opts.sort((a, b) => (a.year !== b.year ? b.year - a.year : b.month - a.month));
+		return opts;
+	});
+
+	async function loadSchedules() {
+		schedulesLoading = true;
+		try {
+			schedules = (await listSchedules(scheduleMonth, scheduleYear)) || [];
+		} catch (err) {
+			globalError = err instanceof Error ? err.message : 'Gagal memuat jadwal';
+		} finally {
+			schedulesLoading = false;
+		}
+	}
+
+	async function loadSchedulePeriods() {
+		try {
+			schedulePeriods = (await listSchedulePeriods()) || [];
+		} catch {
+			// non-fatal -- dropdown filter tetap jalan pakai rentang default kalau ini gagal
+		}
+	}
+
+	function handleScheduleMonthChange(value: string) {
+		const [y, m] = value.split('-').map(Number);
+		scheduleYear = y;
+		scheduleMonth = m;
+		loadSchedules();
+	}
+
 	let showModalJadwal = $state(false);
 	let newJadwal = $state({
 		teacher_id: 0,
 		room_id: 0,
 		day_of_week: 1,
+		period_month: now.getMonth() + 1,
+		period_year: now.getFullYear(),
 		start_time: '07:00',
 		end_time: '08:00',
 		target_jp: 1,
@@ -431,15 +492,22 @@
 	});
 	let jadwalFormError = $state('');
 
-	async function loadSchedules() {
-		schedulesLoading = true;
-		try {
-			schedules = (await listSchedules()) || [];
-		} catch (err) {
-			globalError = err instanceof Error ? err.message : 'Gagal memuat jadwal';
-		} finally {
-			schedulesLoading = false;
-		}
+	// Default periode jadwal baru mengikuti bulan yang SEDANG difilter/dilihat
+	// admin, supaya jadwal yang baru dibuat langsung muncul di grid.
+	function openAddJadwal() {
+		newJadwal = {
+			teacher_id: 0,
+			room_id: 0,
+			day_of_week: 1,
+			period_month: scheduleMonth,
+			period_year: scheduleYear,
+			start_time: '07:00',
+			end_time: '08:00',
+			target_jp: 1,
+			subject: ''
+		};
+		jadwalFormError = '';
+		showModalJadwal = true;
 	}
 
 	async function handleAddJadwal(e: Event) {
@@ -455,16 +523,8 @@
 				start_time: newJadwal.start_time + ':00',
 				end_time: newJadwal.end_time + ':00'
 			});
-			newJadwal = {
-				teacher_id: 0,
-				room_id: 0,
-				day_of_week: 1,
-				start_time: '07:00',
-				end_time: '08:00',
-				target_jp: 1,
-				subject: ''
-			};
 			showModalJadwal = false;
+			await loadSchedulePeriods();
 			await loadSchedules();
 		} catch (err) {
 			jadwalFormError = err instanceof Error ? err.message : 'Gagal menyimpan jadwal';
@@ -477,6 +537,8 @@
 		teacher_id: 0,
 		room_id: 0,
 		day_of_week: 1,
+		period_month: now.getMonth() + 1,
+		period_year: now.getFullYear(),
 		start_time: '07:00',
 		end_time: '08:00',
 		target_jp: 1,
@@ -484,18 +546,32 @@
 	});
 	let editJadwalFormError = $state('');
 
+	// --- Duplikasi jadwal ke bulan lain: shortcut supaya admin tidak perlu
+	// input ulang dari nol tiap bulan baru kalau susunannya sama/mirip. ---
+	let duplicateTargetMonth = $state(now.getMonth() + 1);
+	let duplicateTargetYear = $state(now.getFullYear());
+	let duplicateLoading = $state(false);
+	let duplicateMessage = $state('');
+
 	function openEditJadwal(s: Schedule) {
 		editJadwalId = s.id;
 		editJadwal = {
 			teacher_id: s.teacher_id,
 			room_id: s.room_id,
 			day_of_week: s.day_of_week,
+			period_month: s.period_month,
+			period_year: s.period_year,
 			start_time: s.start_time ? s.start_time.slice(0, 5) : '07:00',
 			end_time: s.end_time ? s.end_time.slice(0, 5) : '08:00',
 			target_jp: s.target_jp,
 			subject: s.subject ?? ''
 		};
 		editJadwalFormError = '';
+		duplicateMessage = '';
+		// Default target duplikasi: bulan berikutnya dari jadwal ini.
+		const next = new Date(s.period_year, s.period_month, 1); // period_month sudah 1-based, jadi ini otomatis +1 bulan
+		duplicateTargetMonth = next.getMonth() + 1;
+		duplicateTargetYear = next.getFullYear();
 		showModalEditJadwal = true;
 	}
 
@@ -513,9 +589,29 @@
 				end_time: editJadwal.end_time + ':00'
 			});
 			showModalEditJadwal = false;
+			await loadSchedulePeriods();
 			await loadSchedules();
 		} catch (err) {
 			editJadwalFormError = err instanceof Error ? err.message : 'Gagal memperbarui jadwal';
+		}
+	}
+
+	async function handleDuplicateJadwal() {
+		if (editJadwalId === null) return;
+		duplicateMessage = '';
+		duplicateLoading = true;
+		try {
+			await duplicateSchedule(editJadwalId, duplicateTargetMonth, duplicateTargetYear);
+			duplicateMessage = `✅ Berhasil diduplikasi ke ${monthName(duplicateTargetMonth)} ${duplicateTargetYear}`;
+			await loadSchedulePeriods();
+			if (duplicateTargetMonth === scheduleMonth && duplicateTargetYear === scheduleYear) {
+				await loadSchedules();
+			}
+		} catch (err) {
+			duplicateMessage = '';
+			editJadwalFormError = err instanceof Error ? err.message : 'Gagal menduplikasi jadwal';
+		} finally {
+			duplicateLoading = false;
 		}
 	}
 
@@ -835,7 +931,6 @@
 	// ------------------------------------------------------------------
 	// 6. Laporan (GET /api/admin/reports/monthly, /daily, /substitutes, /annual, /history)
 	// ------------------------------------------------------------------
-	const now = new Date();
 
 	// Sub-tab di dalam halaman Laporan: Bulanan / Harian / Guru Pengganti / Tahunan.
 	let reportSubTab = $state<'bulanan' | 'harian' | 'pengganti' | 'tahunan'>('bulanan');
@@ -1080,6 +1175,7 @@
 				loadTeachers(),
 				loadRooms(),
 				loadSchedules(),
+				loadSchedulePeriods(),
 				loadLeaves(),
 				loadTodayHistory(),
 				loadLeaveTypesAdmin()
@@ -1485,6 +1581,17 @@
 						</div>
 						<div class="flex items-center gap-2 flex-wrap">
 							<div class="relative">
+								<select
+									value={`${scheduleYear}-${scheduleMonth}`}
+									onchange={(e) => handleScheduleMonthChange((e.currentTarget as HTMLSelectElement).value)}
+									class="appearance-none bg-emerald-700 text-white pl-3.5 pr-7 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-emerald-800 transition">
+									{#each monthYearOptions as opt}
+										<option value={`${opt.year}-${opt.month}`}>{monthName(opt.month)} {opt.year}</option>
+									{/each}
+								</select>
+								<span class="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-white text-[10px]">▾</span>
+							</div>
+							<div class="relative">
 								<select bind:value={filterTeacherId}
 									class="appearance-none bg-blue-900 text-white pl-3.5 pr-7 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-blue-950 transition">
 									<option value="">Guru ▾ (Semua)</option>
@@ -1504,11 +1611,16 @@
 								</select>
 								<span class="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-white text-[10px]">▾</span>
 							</div>
-							<button type="button" onclick={() => (showModalJadwal = true)}
+							<button type="button" onclick={openAddJadwal}
 								class="bg-slate-800 text-white px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-slate-900 transition flex items-center gap-1.5 shadow-sm">
 								<span>+</span> Tambah Jadwal
 							</button>
 						</div>
+					</div>
+					<div class="px-6 pt-3 -mb-2">
+						<p class="text-[11px] text-slate-400">
+							📅 Menampilkan jadwal periode <b class="text-slate-500">{monthName(scheduleMonth)} {scheduleYear}</b>. Jadwal terikat per bulan — susunan bisa berbeda tiap bulan, riwayat bulan lalu tetap tersimpan & bisa dibuka lagi lewat filter ini.
+						</p>
 					</div>
 					<div class="p-6">
 						{#if schedulesLoading}
@@ -2617,6 +2729,20 @@
 				</div>
 				<div class="grid grid-cols-2 gap-3">
 					<div>
+						<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Bulan Berlaku</label>
+						<select bind:value={newJadwal.period_month} class="w-full border border-slate-300 rounded-lg p-2.5 text-sm bg-white">
+							{#each Array(12) as _, i}
+								<option value={i + 1}>{monthName(i + 1)}</option>
+							{/each}
+						</select>
+					</div>
+					<div>
+						<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Tahun</label>
+						<input type="number" bind:value={newJadwal.period_year} required class="w-full border border-slate-300 rounded-lg p-2.5 text-sm" />
+					</div>
+				</div>
+				<div class="grid grid-cols-2 gap-3">
+					<div>
 						<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Jam Mulai</label>
 						<input type="time" bind:value={newJadwal.start_time} required class="w-full border border-slate-300 rounded-lg p-2.5 text-sm" />
 					</div>
@@ -2684,6 +2810,20 @@
 				</div>
 				<div class="grid grid-cols-2 gap-3">
 					<div>
+						<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Bulan Berlaku</label>
+						<select bind:value={editJadwal.period_month} class="w-full border border-slate-300 rounded-lg p-2.5 text-sm bg-white">
+							{#each Array(12) as _, i}
+								<option value={i + 1}>{monthName(i + 1)}</option>
+							{/each}
+						</select>
+					</div>
+					<div>
+						<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Tahun</label>
+						<input type="number" bind:value={editJadwal.period_year} required class="w-full border border-slate-300 rounded-lg p-2.5 text-sm" />
+					</div>
+				</div>
+				<div class="grid grid-cols-2 gap-3">
+					<div>
 						<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Jam Mulai</label>
 						<input type="time" bind:value={editJadwal.start_time} required class="w-full border border-slate-300 rounded-lg p-2.5 text-sm" />
 					</div>
@@ -2699,6 +2839,32 @@
 				<div>
 					<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Mata Pelajaran</label>
 					<input type="text" bind:value={editJadwal.subject} class="w-full border border-slate-300 rounded-lg p-2.5 text-sm" />
+				</div>
+
+				<!-- Duplikasi ke bulan lain: shortcut supaya tidak perlu input ulang tiap bulan baru -->
+				<div class="bg-emerald-50 border border-emerald-200 rounded-lg p-3 space-y-2">
+					<p class="text-xs font-bold text-emerald-800">📋 Duplikasi jadwal ini ke bulan lain</p>
+					<div class="flex gap-2 items-end">
+						<div class="flex-1">
+							<label class="block text-[10px] font-bold text-emerald-700 uppercase mb-1">Bulan</label>
+							<select bind:value={duplicateTargetMonth} class="w-full border border-emerald-300 rounded-lg p-2 text-xs bg-white">
+								{#each Array(12) as _, i}
+									<option value={i + 1}>{monthName(i + 1)}</option>
+								{/each}
+							</select>
+						</div>
+						<div class="w-20">
+							<label class="block text-[10px] font-bold text-emerald-700 uppercase mb-1">Tahun</label>
+							<input type="number" bind:value={duplicateTargetYear} class="w-full border border-emerald-300 rounded-lg p-2 text-xs" />
+						</div>
+						<button type="button" onclick={handleDuplicateJadwal} disabled={duplicateLoading}
+							class="bg-emerald-700 text-white px-3 py-2 rounded-lg text-xs font-bold border-0 cursor-pointer hover:bg-emerald-800 disabled:opacity-60">
+							{duplicateLoading ? '...' : 'Duplikasi'}
+						</button>
+					</div>
+					{#if duplicateMessage}
+						<p class="text-[11px] font-semibold text-emerald-700">{duplicateMessage}</p>
+					{/if}
 				</div>
 
 				<div class="flex justify-between items-center gap-2 pt-3 border-t border-slate-100">
