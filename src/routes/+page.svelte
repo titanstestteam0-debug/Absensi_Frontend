@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import {
 		login,
 		clearSession,
@@ -39,6 +40,12 @@
 		getSubstituteReport,
 		getAnnualReport,
 		updateMyPhoto,
+		getSchoolSettings,
+		updateSchoolSettings,
+		listAcademicYears,
+		createAcademicYear,
+		activateAcademicYear,
+		deleteAcademicYear,
 		type Teacher,
 		type Room,
 		type Schedule,
@@ -49,7 +56,9 @@
 		type HistoryRow,
 		type DailyReport,
 		type SubstituteReport,
-		type AnnualReport
+		type AnnualReport,
+		type SchoolSettings,
+		type AcademicYear
 	} from '$lib/api';
 
 	// ------------------------------------------------------------------
@@ -66,6 +75,27 @@
 
 	const DAY_NAMES = ['', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu', 'Minggu'];
 	const now = new Date();
+
+	// ------------------------------------------------------------------
+	// 0b. Identitas Sekolah (branding header) -- dimuat di awal, BAHKAN
+	// SEBELUM login, karena modal login juga menampilkan nama/logo ini.
+	// ------------------------------------------------------------------
+	let schoolSettings = $state<SchoolSettings>({ school_name: null, logo_data_url: null });
+	const appTitle = $derived(
+		schoolSettings.school_name ? `${schoolSettings.school_name} Absensi Guru` : 'SIM-ABSENSI GURU'
+	);
+
+	async function loadSchoolSettings() {
+		try {
+			schoolSettings = await getSchoolSettings();
+		} catch {
+			// non-fatal -- header tetap pakai default bawaan kalau ini gagal dimuat
+		}
+	}
+
+	onMount(() => {
+		loadSchoolSettings();
+	});
 
 	async function handleLogin(e: Event) {
 		e.preventDefault();
@@ -160,6 +190,128 @@
 			fotoError = err instanceof Error ? err.message : 'Gagal menyimpan foto profil';
 		} finally {
 			fotoLoading = false;
+		}
+	}
+
+	// ------------------------------------------------------------------
+	// 1c. Panel Pengaturan (⚙️) -- khusus admin: Tahun Ajaran + Identitas
+	// Sekolah (nama & logo yang tampil di header aplikasi).
+	// ------------------------------------------------------------------
+	let showModalSettings = $state(false);
+	let settingsTab = $state<'branding' | 'tahun-ajaran'>('branding');
+
+	// --- Identitas Sekolah ---
+	let brandingForm = $state({ school_name: '', logo_data_url: '' });
+	let brandingLogoPreview = $state<string | null>(null);
+	let brandingError = $state('');
+	let brandingLoading = $state(false);
+
+	function openSettings() {
+		settingsTab = 'branding';
+		brandingForm = {
+			school_name: schoolSettings.school_name ?? '',
+			logo_data_url: schoolSettings.logo_data_url ?? ''
+		};
+		brandingLogoPreview = schoolSettings.logo_data_url ?? null;
+		brandingError = '';
+		showModalSettings = true;
+		loadAcademicYears();
+	}
+
+	async function handlePickLogo(e: Event) {
+		brandingError = '';
+		const input = e.target as HTMLInputElement;
+		const file = input.files?.[0];
+		if (!file) return;
+
+		if (!['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/svg+xml'].includes(file.type)) {
+			brandingError = 'Format harus JPEG, PNG, WEBP, atau SVG';
+			return;
+		}
+		if (file.size > 1.5 * 1024 * 1024) {
+			brandingError = 'Ukuran file maksimal 1.5MB';
+			return;
+		}
+
+		try {
+			const dataUrl = await fileToDataURL(file);
+			brandingLogoPreview = dataUrl;
+			brandingForm.logo_data_url = dataUrl;
+		} catch (err) {
+			brandingError = err instanceof Error ? err.message : 'Gagal membaca file gambar';
+		}
+	}
+
+	function handleResetLogo() {
+		brandingLogoPreview = null;
+		brandingForm.logo_data_url = '';
+	}
+
+	async function handleSaveBranding(e: Event) {
+		e.preventDefault();
+		brandingError = '';
+		brandingLoading = true;
+		try {
+			await updateSchoolSettings(brandingForm);
+			await loadSchoolSettings();
+		} catch (err) {
+			brandingError = err instanceof Error ? err.message : 'Gagal menyimpan identitas sekolah';
+		} finally {
+			brandingLoading = false;
+		}
+	}
+
+	// --- Tahun Ajaran ---
+	let academicYears = $state<AcademicYear[]>([]);
+	let academicYearsLoading = $state(false);
+	let newAcademicYearStart = $state(now.getFullYear());
+	let academicYearError = $state('');
+
+	async function loadAcademicYears() {
+		academicYearsLoading = true;
+		try {
+			academicYears = (await listAcademicYears()) || [];
+		} catch (err) {
+			academicYearError = err instanceof Error ? err.message : 'Gagal memuat data tahun ajaran';
+		} finally {
+			academicYearsLoading = false;
+		}
+	}
+
+	async function handleAddAcademicYear() {
+		academicYearError = '';
+		try {
+			await createAcademicYear(newAcademicYearStart);
+			await loadAcademicYears();
+		} catch (err) {
+			academicYearError = err instanceof Error ? err.message : 'Gagal membuat tahun ajaran';
+		}
+	}
+
+	async function handleActivateAcademicYear(y: AcademicYear) {
+		if (
+			!confirm(
+				`Aktifkan tahun ajaran ${y.label}? Tahun ajaran yang sedang aktif sekarang akan otomatis jadi draft.`
+			)
+		)
+			return;
+		academicYearError = '';
+		try {
+			await activateAcademicYear(y.id);
+			await loadAcademicYears();
+		} catch (err) {
+			academicYearError = err instanceof Error ? err.message : 'Gagal mengaktifkan tahun ajaran';
+		}
+	}
+
+	async function handleDeleteAcademicYear(y: AcademicYear) {
+		if (!confirm(`Hapus draft tahun ajaran ${y.label}?`)) return;
+		academicYearError = '';
+		try {
+			await deleteAcademicYear(y.id);
+			await loadAcademicYears();
+		} catch (err) {
+			academicYearError = err instanceof Error ? err.message : 'Gagal menghapus tahun ajaran';
 		}
 	}
 
@@ -1211,10 +1363,14 @@
 	<div class="fixed inset-0 bg-blue-950/80 backdrop-blur-sm flex justify-center items-center p-4 z-50">
 		<div class="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
 			<div class="bg-blue-900 px-6 py-6 text-center text-white space-y-2 border-b-4 border-amber-400">
-				<div class="w-12 h-12 bg-blue-800 rounded-xl mx-auto flex items-center justify-center text-2xl font-black text-amber-400 shadow-inner">
-					🏫
+				<div class="w-12 h-12 bg-blue-800 rounded-xl mx-auto flex items-center justify-center text-2xl font-black text-amber-400 shadow-inner overflow-hidden">
+					{#if schoolSettings.logo_data_url}
+						<img src={schoolSettings.logo_data_url} alt="Logo Sekolah" class="w-full h-full object-contain" />
+					{:else}
+						🏫
+					{/if}
 				</div>
-				<h2 class="text-xl font-black tracking-wide">SIM-ABSENSI GURU</h2>
+				<h2 class="text-xl font-black tracking-wide">{appTitle}</h2>
 				<p class="text-xs text-blue-200">Masuk sebagai Admin atau Guru (akun dari database)</p>
 			</div>
 
@@ -1250,16 +1406,29 @@
 	<header class="bg-blue-900 text-white shadow-md border-b-4 border-amber-400">
 		<div class="max-w-7xl mx-auto px-6 py-3.5 flex justify-between items-center">
 			<div class="flex items-center gap-3">
-				<div class="w-10 h-10 bg-blue-800 rounded-lg flex items-center justify-center text-xl font-black text-amber-400 border border-blue-700 shadow-inner">
-					🏫
+				<div class="w-10 h-10 bg-blue-800 rounded-lg flex items-center justify-center text-xl font-black text-amber-400 border border-blue-700 shadow-inner overflow-hidden">
+					{#if schoolSettings.logo_data_url}
+						<img src={schoolSettings.logo_data_url} alt="Logo Sekolah" class="w-full h-full object-contain" />
+					{:else}
+						🏫
+					{/if}
 				</div>
 				<div>
-					<h1 class="text-lg font-bold tracking-wide leading-tight">SIM-ABSENSI GURU</h1>
+					<h1 class="text-lg font-bold tracking-wide leading-tight">{appTitle}</h1>
 					<p class="text-xs text-blue-200">Sistem Presensi Mengajar berbasis QR Code</p>
 				</div>
 			</div>
 
 			<div class="flex items-center gap-3">
+				{#if currentUser.role === 'admin'}
+					<button
+						type="button"
+						title="Pengaturan"
+						onclick={openSettings}
+						class="w-9 h-9 bg-blue-800 text-amber-300 rounded-full flex items-center justify-center text-sm shadow border border-blue-700 cursor-pointer hover:bg-blue-700 transition">
+						⚙️
+					</button>
+				{/if}
 				<div class="text-right hidden sm:block">
 					<p class="text-sm font-bold text-amber-300 leading-tight">{currentUser.name}</p>
 					<p class="text-xs text-blue-200">
@@ -2486,6 +2655,139 @@
 						{fotoLoading ? 'Menyimpan...' : 'Simpan Foto'}
 					</button>
 				</div>
+			</div>
+		</div>
+	</div>
+{/if}
+
+<!-- ================= MODAL PENGATURAN (⚙️ Tahun Ajaran + Identitas Sekolah) ================= -->
+{#if showModalSettings}
+	<div class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex justify-center items-center p-4 z-50">
+		<div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden border border-slate-200 max-h-[90vh] flex flex-col">
+			<div class="bg-blue-900 px-6 py-4 text-white flex justify-between items-center flex-shrink-0">
+				<h3 class="font-bold text-base">⚙️ Pengaturan</h3>
+				<button type="button" onclick={() => (showModalSettings = false)} class="text-blue-200 hover:text-white border-0 bg-transparent text-xl font-bold cursor-pointer">✕</button>
+			</div>
+
+			<div class="flex border-b border-slate-200 flex-shrink-0">
+				<button type="button" onclick={() => (settingsTab = 'branding')}
+					class="flex-1 py-3 text-sm font-bold border-0 cursor-pointer transition {settingsTab === 'branding' ? 'text-blue-900 border-b-2 border-blue-900 bg-blue-50' : 'text-slate-400 bg-white hover:bg-slate-50'}">
+					🏫 Identitas Sekolah
+				</button>
+				<button type="button" onclick={() => (settingsTab = 'tahun-ajaran')}
+					class="flex-1 py-3 text-sm font-bold border-0 cursor-pointer transition {settingsTab === 'tahun-ajaran' ? 'text-blue-900 border-b-2 border-blue-900 bg-blue-50' : 'text-slate-400 bg-white hover:bg-slate-50'}">
+					📅 Tahun Ajaran
+				</button>
+			</div>
+
+			<div class="p-6 overflow-y-auto">
+				{#if settingsTab === 'branding'}
+					<form onsubmit={handleSaveBranding} class="space-y-4">
+						<p class="text-xs text-slate-500">Ganti nama & logo yang tampil di header aplikasi dan halaman login. Judul otomatis jadi <b>"(Nama Sekolah) Absensi Guru"</b>.</p>
+
+						{#if brandingError}
+							<div class="bg-rose-50 border border-rose-200 text-rose-700 p-2.5 rounded-lg text-xs font-semibold">{brandingError}</div>
+						{/if}
+
+						<div class="flex justify-center">
+							<div class="w-24 h-24 rounded-xl overflow-hidden bg-slate-100 border-2 border-slate-200 flex items-center justify-center text-3xl">
+								{#if brandingLogoPreview}
+									<img src={brandingLogoPreview} alt="Preview logo" class="w-full h-full object-contain" />
+								{:else}
+									🏫
+								{/if}
+							</div>
+						</div>
+
+						<div>
+							<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Logo Sekolah</label>
+							<input type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" onchange={handlePickLogo}
+								class="w-full border border-slate-300 rounded-lg p-2 text-xs file:mr-3 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:bg-blue-50 file:text-blue-800 file:text-xs file:font-bold cursor-pointer" />
+							<div class="flex items-center justify-between mt-1">
+								<p class="text-[11px] text-slate-400">JPEG, PNG, WEBP, atau SVG. Maksimal 1.5MB.</p>
+								{#if brandingLogoPreview}
+									<button type="button" onclick={handleResetLogo} class="text-[11px] text-rose-600 font-semibold bg-transparent border-0 cursor-pointer hover:underline">Kembalikan ke default</button>
+								{/if}
+							</div>
+						</div>
+
+						<div>
+							<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Nama Sekolah</label>
+							<input type="text" bind:value={brandingForm.school_name} placeholder="Contoh: SMA Negeri 1 Contoh"
+								class="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-800 focus:outline-none" />
+							<p class="text-[11px] text-slate-400 mt-1">
+								Preview judul: <b class="text-slate-600">{brandingForm.school_name ? `${brandingForm.school_name} Absensi Guru` : 'SIM-ABSENSI GURU'}</b>
+							</p>
+						</div>
+
+						<div class="flex justify-end gap-2 pt-3 border-t border-slate-100">
+							<button type="submit" disabled={brandingLoading}
+								class="px-4 py-2 bg-blue-900 text-white rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-blue-950 disabled:opacity-50">
+								{brandingLoading ? 'Menyimpan...' : 'Simpan Identitas Sekolah'}
+							</button>
+						</div>
+					</form>
+
+				{:else}
+					<div class="space-y-4">
+						<p class="text-xs text-slate-500">
+							Hanya <b>1</b> tahun ajaran yang aktif dalam satu waktu. Buat draft tahun ajaran depan lebih dulu, tinggal aktifkan kapan saja waktunya tiba — tahun ajaran lain tetap tersimpan sebagai draft (tidak hilang, tidak bisa dipakai sampai diaktifkan lagi).
+						</p>
+
+						{#if academicYearError}
+							<div class="bg-rose-50 border border-rose-200 text-rose-700 p-2.5 rounded-lg text-xs font-semibold">{academicYearError}</div>
+						{/if}
+
+						<div class="flex items-end gap-2 bg-slate-50 border border-slate-200 rounded-lg p-3">
+							<div class="flex-1">
+								<label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Buat Draft Tahun Ajaran Baru</label>
+								<div class="flex items-center gap-1.5">
+									<input type="number" bind:value={newAcademicYearStart} class="w-24 border border-slate-300 rounded-lg p-2 text-sm" />
+									<span class="text-slate-400 text-sm">/ {newAcademicYearStart + 1}</span>
+								</div>
+							</div>
+							<button type="button" onclick={handleAddAcademicYear}
+								class="bg-blue-900 text-white px-3.5 py-2 rounded-lg text-xs font-bold border-0 cursor-pointer hover:bg-blue-950">
+								+ Tambah Draft
+							</button>
+						</div>
+
+						{#if academicYearsLoading}
+							<p class="text-sm text-slate-400">Memuat...</p>
+						{:else if academicYears.length === 0}
+							<p class="text-sm text-slate-400">Belum ada tahun ajaran. Tambahkan dulu di atas.</p>
+						{:else}
+							<div class="divide-y divide-slate-100 border border-slate-200 rounded-lg overflow-hidden">
+								{#each academicYears as y}
+									<div class="flex items-center justify-between px-4 py-3 {y.is_active ? 'bg-emerald-50' : 'bg-white'}">
+										<div class="flex items-center gap-2">
+											<span class="font-bold text-slate-800">{y.label}</span>
+											{#if y.is_active}
+												<span class="inline-flex items-center gap-1 bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full text-[10px] font-bold">
+													<span class="w-1.5 h-1.5 rounded-full bg-emerald-600"></span> Aktif
+												</span>
+											{:else}
+												<span class="bg-slate-200 text-slate-500 px-2 py-0.5 rounded-full text-[10px] font-bold">Draft</span>
+											{/if}
+										</div>
+										<div class="flex gap-2">
+											{#if !y.is_active}
+												<button type="button" onclick={() => handleActivateAcademicYear(y)}
+													class="bg-emerald-100 text-emerald-700 px-3 py-1 rounded text-xs font-bold border-0 cursor-pointer hover:bg-emerald-200">
+													✅ Aktifkan
+												</button>
+												<button type="button" onclick={() => handleDeleteAcademicYear(y)}
+													class="bg-rose-100 text-rose-700 px-3 py-1 rounded text-xs font-bold border-0 cursor-pointer hover:bg-rose-200">
+													🗑️
+												</button>
+											{/if}
+										</div>
+									</div>
+								{/each}
+							</div>
+						{/if}
+					</div>
+				{/if}
 			</div>
 		</div>
 	</div>

@@ -506,3 +506,45 @@ export const updateMyPhoto = (photoBase64: string) =>
 		method: 'PUT',
 		body: { photo_base64: photoBase64 }
 	});
+
+// ------------------------------------------------------------------
+// Identitas Sekolah (nama & logo) -- dipakai buat branding header,
+// dikelola lewat panel Pengaturan (⚙️) admin.
+// ------------------------------------------------------------------
+export interface SchoolSettings {
+	school_name: string | null;
+	logo_data_url: string | null;
+}
+
+// Publik, tanpa auth -- dipakai render header & modal login SEBELUM login.
+export const getSchoolSettings = () => request<SchoolSettings>('/settings/school', { auth: false });
+
+// nameValue/logoDataUrl kosong ("") berarti "kembalikan ke default aplikasi".
+export const updateSchoolSettings = (payload: { school_name: string; logo_data_url: string }) =>
+	request<null>('/admin/settings/school', { method: 'PUT', body: payload });
+
+// ------------------------------------------------------------------
+// Tahun Ajaran -- hanya 1 yang boleh aktif dalam satu waktu, sisanya
+// tersimpan sebagai draft (bisa disiapkan lebih dulu, tinggal diaktifkan).
+// ------------------------------------------------------------------
+export interface AcademicYear {
+	id: number;
+	label: string; // "2026/2027"
+	start_year: number;
+	end_year: number;
+	is_active: boolean;
+}
+
+export const listAcademicYears = () => request<AcademicYear[]>('/admin/academic-years');
+
+export const createAcademicYear = (startYear: number) =>
+	request<{ id: number; label: string }>('/admin/academic-years', {
+		method: 'POST',
+		body: { start_year: startYear }
+	});
+
+export const activateAcademicYear = (id: number) =>
+	request<null>(`/admin/academic-years/${id}/activate`, { method: 'PUT' });
+
+export const deleteAcademicYear = (id: number) =>
+	request<null>(`/admin/academic-years/${id}`, { method: 'DELETE' });
