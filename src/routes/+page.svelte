@@ -777,12 +777,12 @@
 	}
 
 	async function handleDeleteJadwal(s: Schedule) {
-		if (!confirm(`Nonaktifkan jadwal "${s.teacher_name}" di "${s.room_name}"?`)) return;
+		if (!confirm(`Hapus jadwal "${s.teacher_name}" di "${s.room_name}" pada ${DAY_NAMES[s.day_of_week]}?`)) return;
 		try {
 			await deleteSchedule(s.id);
 			await loadSchedules();
 		} catch (err) {
-			globalError = err instanceof Error ? err.message : 'Gagal menonaktifkan jadwal';
+			globalError = err instanceof Error ? err.message : 'Gagal menghapus jadwal';
 		}
 	}
 
