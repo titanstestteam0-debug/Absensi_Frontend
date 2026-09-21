@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import {
 		login,
 		clearSession,
@@ -46,6 +46,10 @@
 		createAcademicYear,
 		activateAcademicYear,
 		deleteAcademicYear,
+		listMyNotifications,
+		markNotificationRead,
+		markAllNotificationsRead,
+		listAllNotificationsAdmin,
 		type Teacher,
 		type Room,
 		type Schedule,
@@ -58,7 +62,9 @@
 		type SubstituteReport,
 		type AnnualReport,
 		type SchoolSettings,
-		type AcademicYear
+		type AcademicYear,
+		type AppNotification,
+		type AdminNotifications
 	} from '$lib/api';
 
 	// ------------------------------------------------------------------
@@ -123,6 +129,9 @@
 		currentUser = null;
 		isLoggedIn = false;
 		loginInput = { nip: '', password: '' };
+		showNotifPanel = false;
+		myNotifs = [];
+		myUnreadCount = 0;
 	}
 
 	// ------------------------------------------------------------------
@@ -1329,6 +1338,148 @@
 		}
 	}
 
+	// ------------------------------------------------------------------
+	// Notifikasi (GET /api/notifications, GET /api/admin/notifications)
+	// Dua tampilan dari data yang sama:
+	//  (a) lonceng di header  -> notifikasi MILIK user yang login (semua role),
+	//      di sinilah notifikasi ditandai "sudah dibaca"
+	//  (b) tabel di halaman Data Ruangan (admin) -> SEMUA notifikasi yang
+	//      dikirim ke semua pengguna, lengkap dengan status baca-nya
+	// ------------------------------------------------------------------
+	let myNotifs = $state<AppNotification[]>([]);
+	let myUnreadCount = $state(0);
+	let showNotifPanel = $state(false);
+
+	let adminNotifs = $state<AdminNotifications>({
+		summary: { total: 0, unread: 0, read: 0 },
+		items: []
+	});
+	let adminNotifsLoading = $state(false);
+	let adminNotifFilter = $state<'all' | 'unread' | 'read'>('all');
+
+	// Label & warna badge per tipe notifikasi. Tipe yang belum terdaftar di
+	// sini tetap tampil dengan badge abu-abu generik.
+	const NOTIF_TYPES: Record<string, { label: string; badge: string }> = {
+		leave_submitted: { label: '📝 Pengajuan Cuti', badge: 'bg-amber-100 text-amber-800 border-amber-300' },
+		leave_approved: { label: '✅ Cuti Disetujui', badge: 'bg-emerald-100 text-emerald-800 border-emerald-300' },
+		leave_rejected: { label: '❌ Cuti Ditolak', badge: 'bg-rose-100 text-rose-800 border-rose-300' },
+		leave_admin_created: { label: '🗂️ Dicatat Admin', badge: 'bg-sky-100 text-sky-800 border-sky-300' }
+	};
+
+	function notifTypeInfo(type: string) {
+		return NOTIF_TYPES[type] ?? { label: '🔔 Notifikasi', badge: 'bg-slate-100 text-slate-700 border-slate-300' };
+	}
+
+	function notifRoleLabel(role?: string) {
+		if (role === 'admin') return '👑 Admin';
+		if (role === 'guru_pengganti') return 'Guru Pengganti';
+		return 'Guru';
+	}
+
+	function formatNotifTime(iso?: string) {
+		if (!iso) return '-';
+		try {
+			return new Date(iso).toLocaleString('id-ID', {
+				day: 'numeric',
+				month: 'short',
+				year: 'numeric',
+				hour: '2-digit',
+				minute: '2-digit'
+			});
+		} catch {
+			return iso;
+		}
+	}
+
+	// "Baru saja", "5 menit lalu", "3 jam lalu", "2 hari lalu", lalu tanggal.
+	function notifTimeAgo(iso: string) {
+		const diffMin = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
+		if (Number.isNaN(diffMin)) return '';
+		if (diffMin < 1) return 'Baru saja';
+		if (diffMin < 60) return `${diffMin} menit lalu`;
+		if (diffMin < 60 * 24) return `${Math.floor(diffMin / 60)} jam lalu`;
+		if (diffMin < 60 * 24 * 7) return `${Math.floor(diffMin / 60 / 24)} hari lalu`;
+		return formatNotifTime(iso);
+	}
+
+	// Dipanggil saat login & tiap 30 detik (polling) -- kegagalannya sengaja
+	// diam supaya tidak mengganggu kalau koneksi sesekali putus.
+	async function loadMyNotifications() {
+		try {
+			const res = await listMyNotifications(30);
+			myNotifs = res?.items ?? [];
+			myUnreadCount = res?.unread_count ?? 0;
+		} catch {
+			// non-fatal
+		}
+	}
+
+	// silent = true untuk refresh otomatis (tanpa teks "Memuat..." yang berkedip).
+	async function loadAdminNotifications(silent = false) {
+		if (!silent) adminNotifsLoading = true;
+		try {
+			const res = await listAllNotificationsAdmin(adminNotifFilter);
+			adminNotifs = {
+				summary: res?.summary ?? { total: 0, unread: 0, read: 0 },
+				items: res?.items ?? []
+			};
+		} catch (err) {
+			if (!silent) globalError = err instanceof Error ? err.message : 'Gagal memuat notifikasi';
+		} finally {
+			adminNotifsLoading = false;
+		}
+	}
+
+	function toggleNotifPanel() {
+		showNotifPanel = !showNotifPanel;
+		if (showNotifPanel) loadMyNotifications();
+	}
+
+	// Klik satu notifikasi di lonceng: tandai dibaca, lalu buka halaman cuti
+	// (semua notifikasi yang ada saat ini berkaitan dengan cuti/izin).
+	async function handleOpenNotif(n: AppNotification) {
+		if (!n.is_read) {
+			try {
+				await markNotificationRead(n.id);
+				n.is_read = true;
+				myUnreadCount = Math.max(0, myUnreadCount - 1);
+				if (currentUser?.role === 'admin' && activeTab === 'ruangan') loadAdminNotifications(true);
+			} catch (err) {
+				globalError = err instanceof Error ? err.message : 'Gagal menandai notifikasi';
+				return;
+			}
+		}
+		showNotifPanel = false;
+		if (n.type.startsWith('leave_')) activeTab = 'cuti';
+	}
+
+	async function handleMarkAllNotifsRead() {
+		try {
+			await markAllNotificationsRead();
+			await loadMyNotifications();
+			if (currentUser?.role === 'admin' && activeTab === 'ruangan') loadAdminNotifications(true);
+		} catch (err) {
+			globalError = err instanceof Error ? err.message : 'Gagal menandai semua notifikasi';
+		}
+	}
+
+	// Polling ringan supaya badge lonceng (dan tabel admin, kalau sedang
+	// dibuka) ikut ter-update tanpa perlu refresh halaman.
+	$effect(() => {
+		if (!isLoggedIn || !currentUser) return;
+		const timer = setInterval(() => {
+			loadMyNotifications();
+			if (currentUser?.role === 'admin' && activeTab === 'ruangan') loadAdminNotifications(true);
+		}, 30000);
+		return () => clearInterval(timer);
+	});
+
+	// Muat tabel notifikasi admin setiap kali tab "Data Ruangan" dibuka.
+	$effect(() => {
+		const ok = isLoggedIn && currentUser?.role === 'admin' && activeTab === 'ruangan';
+		if (ok) untrack(() => loadAdminNotifications(true));
+	});
+
 	async function loadEverythingForRole() {
 		globalError = '';
 		if (currentUser?.role === 'admin') {
@@ -1339,11 +1490,12 @@
 				loadSchedulePeriods(),
 				loadLeaves(),
 				loadTodayHistory(),
-				loadLeaveTypesAdmin()
+				loadLeaveTypesAdmin(),
+				loadMyNotifications()
 			]);
 			await loadMonthlyReport();
 		} else {
-			await Promise.all([loadLeaves(), loadLeaveTypes()]);
+			await Promise.all([loadLeaves(), loadLeaveTypes(), loadMyNotifications()]);
 		}
 	}
 
@@ -1420,6 +1572,57 @@
 			</div>
 
 			<div class="flex items-center gap-3">
+				<div class="relative">
+					<button
+						type="button"
+						title="Notifikasi"
+						aria-label="Notifikasi"
+						onclick={toggleNotifPanel}
+						class="relative w-9 h-9 bg-blue-800 text-amber-300 rounded-full flex items-center justify-center text-sm shadow border border-blue-700 cursor-pointer hover:bg-blue-700 transition">
+						🔔
+						{#if myUnreadCount > 0}
+							<span class="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 bg-rose-600 text-white text-[10px] font-black rounded-full flex items-center justify-center border-2 border-blue-900">
+								{myUnreadCount > 99 ? '99+' : myUnreadCount}
+							</span>
+						{/if}
+					</button>
+
+					{#if showNotifPanel}
+						<button type="button" aria-label="Tutup notifikasi" onclick={() => (showNotifPanel = false)}
+							class="fixed inset-0 z-40 cursor-default bg-transparent border-0"></button>
+						<div class="absolute right-0 mt-2 w-96 max-w-[90vw] bg-white text-slate-800 rounded-xl shadow-2xl border border-slate-200 z-50 overflow-hidden">
+							<div class="px-4 py-3 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
+								<div>
+									<p class="text-sm font-bold text-slate-800">Notifikasi</p>
+									<p class="text-[11px] text-slate-500">{myUnreadCount > 0 ? `${myUnreadCount} belum dibaca` : 'Semua sudah dibaca'}</p>
+								</div>
+								{#if myUnreadCount > 0}
+									<button type="button" onclick={handleMarkAllNotifsRead}
+										class="text-xs font-bold text-blue-800 bg-transparent border-0 cursor-pointer hover:underline">
+										Tandai semua dibaca
+									</button>
+								{/if}
+							</div>
+							<div class="max-h-96 overflow-y-auto divide-y divide-slate-100">
+								{#if myNotifs.length === 0}
+									<p class="px-4 py-8 text-center text-sm text-slate-400">Belum ada notifikasi.</p>
+								{:else}
+									{#each myNotifs as n (n.id)}
+										<button type="button" onclick={() => handleOpenNotif(n)}
+											class="w-full text-left px-4 py-3 border-0 cursor-pointer transition flex gap-3 items-start {n.is_read ? 'bg-white hover:bg-slate-50' : 'bg-blue-50 hover:bg-blue-100'}">
+											<span class="mt-1.5 w-2 h-2 rounded-full flex-shrink-0 {n.is_read ? 'bg-transparent' : 'bg-blue-700'}"></span>
+											<span class="block min-w-0">
+												<span class="block text-sm leading-snug text-slate-800 {n.is_read ? 'font-semibold' : 'font-bold'}">{n.title}</span>
+												<span class="block text-xs text-slate-600 mt-0.5 leading-snug">{n.message}</span>
+												<span class="block text-[11px] text-slate-400 mt-1">{notifTimeAgo(n.created_at)}</span>
+											</span>
+										</button>
+									{/each}
+								{/if}
+							</div>
+						</div>
+					{/if}
+				</div>
 				{#if currentUser.role === 'admin'}
 					<button
 						type="button"
@@ -1745,6 +1948,91 @@
 									{/each}
 								</tbody>
 							</table>
+						{/if}
+					</div>
+				</div>
+
+				<!-- TABEL: NOTIFIKASI TERKIRIM KE PENGGUNA (status sudah dibaca / belum) -->
+				<div class="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden mt-6">
+					<div class="p-6 border-b border-slate-200 bg-slate-50 flex flex-wrap justify-between items-center gap-3">
+						<div>
+							<h2 class="text-lg font-bold text-slate-800">Notifikasi Terkirim ke Pengguna</h2>
+							<p class="text-xs text-slate-500">Pemberitahuan otomatis untuk cuti/izin dan lainnya, beserta keterangan sudah dibaca atau belum oleh penerimanya.</p>
+						</div>
+						<div class="flex flex-wrap items-center gap-2">
+							<select value={adminNotifFilter}
+								onchange={(e) => {
+									adminNotifFilter = e.currentTarget.value as 'all' | 'unread' | 'read';
+									loadAdminNotifications();
+								}}
+								class="border border-slate-300 rounded-lg pl-3 pr-9 py-2 text-sm bg-white font-semibold text-slate-700 focus:ring-2 focus:ring-blue-800 focus:outline-none cursor-pointer">
+								<option value="all">Semua status</option>
+								<option value="unread">Belum dibaca</option>
+								<option value="read">Sudah dibaca</option>
+							</select>
+							<button type="button" onclick={() => loadAdminNotifications()}
+								class="bg-slate-200 text-slate-700 px-3.5 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-slate-300 transition">
+								🔄 Muat Ulang
+							</button>
+						</div>
+					</div>
+
+					<div class="px-6 pt-5 flex flex-wrap gap-2 text-xs font-bold">
+						<span class="bg-slate-100 text-slate-700 border border-slate-300 px-3 py-1 rounded-full">Total: {adminNotifs.summary.total}</span>
+						<span class="bg-amber-100 text-amber-800 border border-amber-300 px-3 py-1 rounded-full">Belum dibaca: {adminNotifs.summary.unread}</span>
+						<span class="bg-emerald-100 text-emerald-800 border border-emerald-300 px-3 py-1 rounded-full">Sudah dibaca: {adminNotifs.summary.read}</span>
+					</div>
+
+					<div class="p-6">
+						{#if adminNotifsLoading}
+							<p class="text-sm text-slate-400">Memuat notifikasi...</p>
+						{:else if adminNotifs.items.length === 0}
+							<p class="text-sm text-slate-400">
+								{adminNotifFilter === 'all' ? 'Belum ada notifikasi yang terkirim.' : 'Tidak ada notifikasi dengan status ini.'}
+							</p>
+						{:else}
+							<div class="overflow-x-auto">
+								<table class="w-full text-left text-sm border-collapse">
+									<thead>
+										<tr class="border-b border-slate-200 text-slate-500 text-xs uppercase font-bold bg-slate-50/50">
+											<th class="py-3 px-4">Waktu Kirim</th>
+											<th class="py-3 px-4">Penerima</th>
+											<th class="py-3 px-4">Jenis</th>
+											<th class="py-3 px-4">Isi Notifikasi</th>
+											<th class="py-3 px-4 text-center">Status</th>
+										</tr>
+									</thead>
+									<tbody class="divide-y divide-slate-100">
+										{#each adminNotifs.items as n (n.id)}
+											<tr class="hover:bg-slate-50 align-top">
+												<td class="py-3.5 px-4 text-slate-600 whitespace-nowrap">{formatNotifTime(n.created_at)}</td>
+												<td class="py-3.5 px-4">
+													<p class="font-semibold text-slate-800 whitespace-nowrap">{n.user_name ?? '-'}</p>
+													<p class="text-[11px] text-slate-400">{notifRoleLabel(n.user_role)}</p>
+												</td>
+												<td class="py-3.5 px-4">
+													<span class="border px-2.5 py-1 rounded-full text-[11px] font-bold inline-block whitespace-nowrap {notifTypeInfo(n.type).badge}">{notifTypeInfo(n.type).label}</span>
+												</td>
+												<td class="py-3.5 px-4 max-w-sm">
+													<p class="font-semibold text-slate-800 leading-snug">{n.title}</p>
+													<p class="text-xs text-slate-600 mt-0.5 leading-snug">{n.message}</p>
+												</td>
+												<td class="py-3.5 px-4 text-center whitespace-nowrap">
+													{#if n.is_read}
+														<span class="bg-emerald-100 text-emerald-800 border border-emerald-300 px-3 py-1 rounded-full text-xs font-bold inline-block">✓ Sudah dibaca</span>
+														<p class="text-[11px] text-slate-400 mt-1">{formatNotifTime(n.read_at)}</p>
+													{:else}
+														<span class="bg-amber-100 text-amber-800 border border-amber-300 px-3 py-1 rounded-full text-xs font-bold inline-block">● Belum dibaca</span>
+													{/if}
+												</td>
+											</tr>
+										{/each}
+									</tbody>
+								</table>
+							</div>
+							{#if adminNotifs.summary.total > adminNotifs.items.length && adminNotifFilter === 'all'}
+								<p class="text-[11px] text-slate-400 mt-3">Menampilkan {adminNotifs.items.length} notifikasi terbaru dari {adminNotifs.summary.total}.</p>
+							{/if}
 						{/if}
 					</div>
 				</div>

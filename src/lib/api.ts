@@ -548,3 +548,47 @@ export const activateAcademicYear = (id: number) =>
 
 export const deleteAcademicYear = (id: number) =>
 	request<null>(`/admin/academic-years/${id}`, { method: 'DELETE' });
+
+// ------------------------------------------------------------------
+// Notifikasi — pesan yang dikirim sistem ke pengguna (mis. cuti disetujui /
+// ditolak, pengajuan cuti baru) beserta status sudah dibaca / belum.
+// ------------------------------------------------------------------
+export interface AppNotification {
+	id: number;
+	user_id: number;
+	// Hanya terisi di daftar milik admin (GET /admin/notifications).
+	user_name?: string;
+	user_role?: 'admin' | 'guru' | 'guru_pengganti';
+	// leave_submitted | leave_approved | leave_rejected | leave_admin_created | ...
+	type: string;
+	title: string;
+	message: string;
+	ref_id?: number;
+	is_read: boolean;
+	read_at?: string;
+	created_at: string;
+}
+
+export interface MyNotifications {
+	unread_count: number;
+	items: AppNotification[];
+}
+
+export interface AdminNotifications {
+	summary: { total: number; unread: number; read: number };
+	items: AppNotification[];
+}
+
+// Notifikasi milik user yang sedang login (dipakai lonceng di header).
+export const listMyNotifications = (limit = 30) =>
+	request<MyNotifications>(`/notifications?limit=${limit}`);
+
+export const markNotificationRead = (id: number) =>
+	request<null>(`/notifications/${id}/read`, { method: 'PUT' });
+
+export const markAllNotificationsRead = () =>
+	request<null>('/notifications/read-all', { method: 'PUT' });
+
+// Admin: semua notifikasi yang dikirim ke semua pengguna + status baca-nya.
+export const listAllNotificationsAdmin = (status: 'all' | 'unread' | 'read' = 'all', limit = 100) =>
+	request<AdminNotifications>(`/admin/notifications?status=${status}&limit=${limit}`);
