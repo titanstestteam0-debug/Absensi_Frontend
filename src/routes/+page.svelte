@@ -1449,7 +1449,7 @@
 				await markNotificationRead(n.id);
 				n.is_read = true;
 				myUnreadCount = Math.max(0, myUnreadCount - 1);
-				if (currentUser?.role === 'admin' && (activeTab === 'ruangan' || activeTab === 'notifikasi')) loadAdminNotifications(true);
+				if (currentUser?.role === 'admin' && activeTab === 'notifikasi') loadAdminNotifications(true);
 			} catch (err) {
 				globalError = err instanceof Error ? err.message : 'Gagal menandai notifikasi';
 				return;
@@ -1463,7 +1463,7 @@
 		try {
 			await markAllNotificationsRead();
 			await loadMyNotifications();
-			if (currentUser?.role === 'admin' && (activeTab === 'ruangan' || activeTab === 'notifikasi')) loadAdminNotifications(true);
+			if (currentUser?.role === 'admin' && activeTab === 'notifikasi') loadAdminNotifications(true);
 		} catch (err) {
 			globalError = err instanceof Error ? err.message : 'Gagal menandai semua notifikasi';
 		}
@@ -1475,14 +1475,14 @@
 		if (!isLoggedIn || !currentUser) return;
 		const timer = setInterval(() => {
 			loadMyNotifications();
-			if (currentUser?.role === 'admin' && (activeTab === 'ruangan' || activeTab === 'notifikasi')) loadAdminNotifications(true);
+			if (currentUser?.role === 'admin' && activeTab === 'notifikasi') loadAdminNotifications(true);
 		}, 30000);
 		return () => clearInterval(timer);
 	});
 
 	// Muat tabel notifikasi admin setiap kali tab "Data Ruangan" atau "Notifikasi" dibuka.
 	$effect(() => {
-		const ok = isLoggedIn && currentUser?.role === 'admin' && (activeTab === 'ruangan' || activeTab === 'notifikasi');
+		const ok = isLoggedIn && currentUser?.role === 'admin' && activeTab === 'notifikasi';
 		if (ok) untrack(() => loadAdminNotifications(true));
 	});
 
@@ -2058,8 +2058,6 @@
 						{/if}
 					</div>
 				</div>
-
-				{@render notifTable()}
 
 			<!-- TAB: NOTIFIKASI -->
 			{:else if activeTab === 'notifikasi' && currentUser.role === 'admin'}
