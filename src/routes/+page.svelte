@@ -86,10 +86,12 @@
 	// 0b. Identitas Sekolah (branding header) -- dimuat di awal, BAHKAN
 	// SEBELUM login, karena modal login juga menampilkan nama/logo ini.
 	// ------------------------------------------------------------------
-	let schoolSettings = $state<SchoolSettings>({ school_name: null, logo_data_url: null });
+	let schoolSettings = $state<SchoolSettings>({ school_name: null, logo_data_url: null, tagline: null });
 	const appTitle = $derived(
 		schoolSettings.school_name ? `${schoolSettings.school_name} Absensi Guru` : 'SIM-ABSENSI GURU'
 	);
+	const DEFAULT_TAGLINE = 'Sistem Presensi Mengajar berbasis QR Code';
+	const appTagline = $derived(schoolSettings.tagline ?? DEFAULT_TAGLINE);
 
 	async function loadSchoolSettings() {
 		try {
@@ -210,7 +212,7 @@
 	let settingsTab = $state<'branding' | 'tahun-ajaran'>('branding');
 
 	// --- Identitas Sekolah ---
-	let brandingForm = $state({ school_name: '', logo_data_url: '' });
+	let brandingForm = $state({ school_name: '', logo_data_url: '', tagline: '' });
 	let brandingLogoPreview = $state<string | null>(null);
 	let brandingError = $state('');
 	let brandingLoading = $state(false);
@@ -219,7 +221,8 @@
 		settingsTab = 'branding';
 		brandingForm = {
 			school_name: schoolSettings.school_name ?? '',
-			logo_data_url: schoolSettings.logo_data_url ?? ''
+			logo_data_url: schoolSettings.logo_data_url ?? '',
+			tagline: schoolSettings.tagline ?? ''
 		};
 		brandingLogoPreview = schoolSettings.logo_data_url ?? null;
 		brandingError = '';
@@ -1573,7 +1576,7 @@
 				</div>
 				<div>
 					<h1 class="text-lg font-bold tracking-wide leading-tight">{appTitle}</h1>
-					<p class="text-xs text-blue-200">Sistem Presensi Mengajar berbasis QR Code</p>
+					<p class="text-xs text-blue-200">{appTagline}</p>
 				</div>
 			</div>
 
@@ -3032,6 +3035,19 @@
 							<p class="text-[11px] text-slate-400 mt-1">
 								Preview judul: <b class="text-slate-600">{brandingForm.school_name ? `${brandingForm.school_name} Absensi Guru` : 'SIM-ABSENSI GURU'}</b>
 							</p>
+						</div>
+
+						<div>
+							<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Subjudul Header</label>
+							<input type="text" bind:value={brandingForm.tagline} maxlength="150"
+								placeholder={DEFAULT_TAGLINE}
+								class="w-full border border-slate-300 rounded-lg p-2.5 text-sm focus:ring-2 focus:ring-blue-800 focus:outline-none" />
+							<div class="flex items-center justify-between mt-1">
+								<p class="text-[11px] text-slate-400">Teks kecil di bawah nama sekolah di header. Kosongkan untuk pakai teks bawaan.</p>
+								{#if brandingForm.tagline}
+									<button type="button" onclick={() => (brandingForm.tagline = '')} class="text-[11px] text-rose-600 font-semibold bg-transparent border-0 cursor-pointer hover:underline whitespace-nowrap">Kembalikan ke default</button>
+								{/if}
+							</div>
 						</div>
 
 						<div class="flex justify-end gap-2 pt-3 border-t border-slate-100">

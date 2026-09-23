@@ -514,13 +514,16 @@ export const updateMyPhoto = (photoBase64: string) =>
 export interface SchoolSettings {
 	school_name: string | null;
 	logo_data_url: string | null;
+	// Subjudul kecil di bawah nama sekolah di header (mis. "Sistem Presensi
+	// Mengajar berbasis QR Code"). null -> tampil teks bawaan aplikasi.
+	tagline: string | null;
 }
 
 // Publik, tanpa auth -- dipakai render header & modal login SEBELUM login.
 export const getSchoolSettings = () => request<SchoolSettings>('/settings/school', { auth: false });
 
-// nameValue/logoDataUrl kosong ("") berarti "kembalikan ke default aplikasi".
-export const updateSchoolSettings = (payload: { school_name: string; logo_data_url: string }) =>
+// school_name/logo_data_url/tagline kosong ("") berarti "kembalikan ke default aplikasi".
+export const updateSchoolSettings = (payload: { school_name: string; logo_data_url: string; tagline: string }) =>
 	request<null>('/admin/settings/school', { method: 'PUT', body: payload });
 
 // ------------------------------------------------------------------
