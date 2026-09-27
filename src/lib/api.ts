@@ -527,30 +527,92 @@ export const updateSchoolSettings = (payload: { school_name: string; logo_data_u
 	request<null>('/admin/settings/school', { method: 'PUT', body: payload });
 
 // ------------------------------------------------------------------
-// Tahun Ajaran -- hanya 1 yang boleh aktif dalam satu waktu, sisanya
-// tersimpan sebagai draft (bisa disiapkan lebih dulu, tinggal diaktifkan).
+// Draft Jadwal -- pengganti "Tahun Ajaran" lama. Draft dinamai bebas
+// (mis. "2026/2027 V1") dan punya susunan jadwalnya SENDIRI, terpisah dari
+// jadwal yang sedang berlaku, sampai draft itu diaktifkan. Hanya 1 draft
+// yang boleh aktif dalam satu waktu.
 // ------------------------------------------------------------------
-export interface AcademicYear {
+export interface ScheduleDraft {
 	id: number;
-	label: string; // "2026/2027"
-	start_year: number;
-	end_year: number;
+	name: string;
 	is_active: boolean;
+	schedule_count: number;
 }
 
-export const listAcademicYears = () => request<AcademicYear[]>('/admin/academic-years');
+export const listDrafts = () => request<ScheduleDraft[]>('/admin/drafts');
 
-export const createAcademicYear = (startYear: number) =>
-	request<{ id: number; label: string }>('/admin/academic-years', {
-		method: 'POST',
-		body: { start_year: startYear }
-	});
+export const createDraft = (name: string) =>
+	request<{ id: number }>('/admin/drafts', { method: 'POST', body: { name } });
 
-export const activateAcademicYear = (id: number) =>
-	request<null>(`/admin/academic-years/${id}/activate`, { method: 'PUT' });
+export const deleteDraft = (id: number) => request<null>(`/admin/drafts/${id}`, { method: 'DELETE' });
 
-export const deleteAcademicYear = (id: number) =>
-	request<null>(`/admin/academic-years/${id}`, { method: 'DELETE' });
+export const activateDraft = (id: number) =>
+	request<{ schedules_applied: number }>(`/admin/drafts/${id}/activate`, { method: 'PUT' });
+
+export const deactivateDraft = (id: number) =>
+	request<{ schedules_removed: number }>(`/admin/drafts/${id}/deactivate`, { method: 'PUT' });
+
+// --- Jadwal DI DALAM sebuah draft (grid editor terpisah dari jadwal live) ---
+export interface DraftSchedule {
+	id: number;
+	draft_id: number;
+	teacher_id: number;
+	teacher_name: string;
+	room_id: number;
+	room_name: string;
+	day_of_week: number;
+	period_month: number;
+	period_year: number;
+	start_time: string;
+	end_time: string;
+	target_jp: number;
+	subject?: string;
+}
+
+export const listDraftSchedules = (draftId: number, month?: number, year?: number) => {
+	const qs = new URLSearchParams();
+	if (month) qs.set('month', String(month));
+	if (year) qs.set('year', String(year));
+	const suffix = qs.toString() ? `?${qs.toString()}` : '';
+	return request<DraftSchedule[]>(`/admin/drafts/${draftId}/schedules${suffix}`);
+};
+
+export const listDraftSchedulePeriods = (draftId: number) =>
+	request<SchedulePeriod[]>(`/admin/drafts/${draftId}/schedules/periods`);
+
+export const createDraftSchedule = (
+	draftId: number,
+	payload: {
+		teacher_id: number;
+		room_id: number;
+		day_of_week: number;
+		period_month?: number;
+		period_year?: number;
+		start_time: string;
+		end_time: string;
+		target_jp: number;
+		subject?: string;
+	}
+) => request<{ id: number }>(`/admin/drafts/${draftId}/schedules`, { method: 'POST', body: payload });
+
+export const updateDraftSchedule = (
+	draftId: number,
+	id: number,
+	payload: {
+		teacher_id: number;
+		room_id: number;
+		day_of_week: number;
+		period_month?: number;
+		period_year?: number;
+		start_time: string;
+		end_time: string;
+		target_jp: number;
+		subject?: string;
+	}
+) => request<null>(`/admin/drafts/${draftId}/schedules/${id}`, { method: 'PUT', body: payload });
+
+export const deleteDraftSchedule = (draftId: number, id: number) =>
+	request<null>(`/admin/drafts/${draftId}/schedules/${id}`, { method: 'DELETE' });
 
 // ------------------------------------------------------------------
 // Notifikasi — pesan yang dikirim sistem ke pengguna (mis. cuti disetujui /

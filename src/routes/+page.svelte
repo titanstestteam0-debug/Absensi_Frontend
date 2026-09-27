@@ -42,10 +42,16 @@
 		updateMyPhoto,
 		getSchoolSettings,
 		updateSchoolSettings,
-		listAcademicYears,
-		createAcademicYear,
-		activateAcademicYear,
-		deleteAcademicYear,
+		listDrafts,
+		createDraft,
+		deleteDraft,
+		activateDraft,
+		deactivateDraft,
+		listDraftSchedules,
+		listDraftSchedulePeriods,
+		createDraftSchedule,
+		updateDraftSchedule,
+		deleteDraftSchedule,
 		listMyNotifications,
 		markNotificationRead,
 		markAllNotificationsRead,
@@ -62,7 +68,8 @@
 		type SubstituteReport,
 		type AnnualReport,
 		type SchoolSettings,
-		type AcademicYear,
+		type ScheduleDraft,
+		type DraftSchedule,
 		type AppNotification,
 		type AdminNotifications
 	} from '$lib/api';
@@ -205,11 +212,11 @@
 	}
 
 	// ------------------------------------------------------------------
-	// 1c. Panel Pengaturan (⚙️) -- khusus admin: Tahun Ajaran + Identitas
+	// 1c. Panel Pengaturan (⚙️) -- khusus admin: Draft Jadwal + Identitas
 	// Sekolah (nama & logo yang tampil di header aplikasi).
 	// ------------------------------------------------------------------
 	let showModalSettings = $state(false);
-	let settingsTab = $state<'branding' | 'tahun-ajaran'>('branding');
+	let settingsTab = $state<'branding' | 'draft-jadwal'>('branding');
 
 	// --- Identitas Sekolah ---
 	let brandingForm = $state({ school_name: '', logo_data_url: '', tagline: '' });
@@ -227,7 +234,7 @@
 		brandingLogoPreview = schoolSettings.logo_data_url ?? null;
 		brandingError = '';
 		showModalSettings = true;
-		loadAcademicYears();
+		loadDrafts();
 	}
 
 	async function handlePickLogo(e: Event) {
@@ -273,57 +280,251 @@
 		}
 	}
 
-	// --- Tahun Ajaran ---
-	let academicYears = $state<AcademicYear[]>([]);
-	let academicYearsLoading = $state(false);
-	let newAcademicYearStart = $state(now.getFullYear());
-	let academicYearError = $state('');
+	// --- Draft Jadwal (pengganti Tahun Ajaran lama) ---
+	let drafts = $state<ScheduleDraft[]>([]);
+	let draftsLoading = $state(false);
+	let newDraftName = $state('');
+	let draftError = $state('');
+	let draftActionLoading = $state<number | null>(null); // id draft yang lagi diproses (aktifkan/nonaktifkan/hapus)
 
-	async function loadAcademicYears() {
-		academicYearsLoading = true;
+	async function loadDrafts() {
+		draftsLoading = true;
 		try {
-			academicYears = (await listAcademicYears()) || [];
+			drafts = (await listDrafts()) || [];
 		} catch (err) {
-			academicYearError = err instanceof Error ? err.message : 'Gagal memuat data tahun ajaran';
+			draftError = err instanceof Error ? err.message : 'Gagal memuat daftar draft';
 		} finally {
-			academicYearsLoading = false;
+			draftsLoading = false;
 		}
 	}
 
-	async function handleAddAcademicYear() {
-		academicYearError = '';
+	async function handleAddDraft() {
+		draftError = '';
+		if (!newDraftName.trim()) {
+			draftError = 'Nama draft wajib diisi';
+			return;
+		}
 		try {
-			await createAcademicYear(newAcademicYearStart);
-			await loadAcademicYears();
+			await createDraft(newDraftName.trim());
+			newDraftName = '';
+			await loadDrafts();
 		} catch (err) {
-			academicYearError = err instanceof Error ? err.message : 'Gagal membuat tahun ajaran';
+			draftError = err instanceof Error ? err.message : 'Gagal membuat draft';
 		}
 	}
 
-	async function handleActivateAcademicYear(y: AcademicYear) {
+	async function handleActivateDraft(d: ScheduleDraft) {
+		const otherActive = drafts.find((x) => x.is_active && x.id !== d.id);
+		const warn = otherActive
+			? `Aktifkan draft "${d.name}"? Draft "${otherActive.name}" yang sedang aktif akan otomatis dinonaktifkan (jadwal live hasil draft itu akan dikosongkan lagi), lalu jadwal dari "${d.name}" akan mengisi periode terkait.`
+			: `Aktifkan draft "${d.name}"? Seluruh isi draft ini akan disalin ke jadwal live pada periode terkait.`;
+		if (!confirm(warn)) return;
+		draftError = '';
+		draftActionLoading = d.id;
+		try {
+			await activateDraft(d.id);
+			await loadDrafts();
+			await loadSchedulePeriods();
+			await loadSchedules();
+		} catch (err) {
+			draftError = err instanceof Error ? err.message : 'Gagal mengaktifkan draft';
+		} finally {
+			draftActionLoading = null;
+		}
+	}
+
+	async function handleDeactivateDraft(d: ScheduleDraft) {
 		if (
 			!confirm(
-				`Aktifkan tahun ajaran ${y.label}? Tahun ajaran yang sedang aktif sekarang akan otomatis jadi draft.`
+				`Nonaktifkan draft "${d.name}"? Jadwal live yang berasal dari draft ini akan dihapus lagi (periode terkait jadi kosong). Isi draft sendiri TIDAK hilang.`
 			)
 		)
 			return;
-		academicYearError = '';
+		draftError = '';
+		draftActionLoading = d.id;
 		try {
-			await activateAcademicYear(y.id);
-			await loadAcademicYears();
+			await deactivateDraft(d.id);
+			await loadDrafts();
+			await loadSchedulePeriods();
+			await loadSchedules();
 		} catch (err) {
-			academicYearError = err instanceof Error ? err.message : 'Gagal mengaktifkan tahun ajaran';
+			draftError = err instanceof Error ? err.message : 'Gagal menonaktifkan draft';
+		} finally {
+			draftActionLoading = null;
 		}
 	}
 
-	async function handleDeleteAcademicYear(y: AcademicYear) {
-		if (!confirm(`Hapus draft tahun ajaran ${y.label}?`)) return;
-		academicYearError = '';
+	async function handleDeleteDraft(d: ScheduleDraft) {
+		if (!confirm(`Hapus draft "${d.name}" beserta seluruh isinya? Tindakan ini tidak bisa dibatalkan.`)) return;
+		draftError = '';
 		try {
-			await deleteAcademicYear(y.id);
-			await loadAcademicYears();
+			await deleteDraft(d.id);
+			await loadDrafts();
 		} catch (err) {
-			academicYearError = err instanceof Error ? err.message : 'Gagal menghapus tahun ajaran';
+			draftError = err instanceof Error ? err.message : 'Gagal menghapus draft';
+		}
+	}
+
+	// ------------------------------------------------------------------
+	// Editor grid untuk isi sebuah draft -- tampilannya sama seperti Jadwal
+	// Mengajar (kalender mingguan per jam), tapi datanya sendiri
+	// (draft_schedules), terpisah dari jadwal live sampai draft diaktifkan.
+	// ------------------------------------------------------------------
+	let showDraftEditor = $state(false);
+	let draftEditor = $state<ScheduleDraft | null>(null);
+	let draftEditorSchedules = $state<DraftSchedule[]>([]);
+	let draftEditorLoading = $state(false);
+	let draftEditorMonth = $state(now.getMonth() + 1);
+	let draftEditorYear = $state(now.getFullYear());
+	let draftEditorPeriods = $state<SchedulePeriod[]>([]);
+
+	function openDraftEditor(d: ScheduleDraft) {
+		draftEditor = d;
+		draftEditorMonth = now.getMonth() + 1;
+		draftEditorYear = now.getFullYear();
+		showDraftEditor = true;
+		loadDraftEditorPeriods();
+		loadDraftEditorSchedules();
+	}
+
+	function closeDraftEditor() {
+		showDraftEditor = false;
+		draftEditor = null;
+		loadDrafts(); // jumlah jadwal (schedule_count) di kartu daftar draft mungkin berubah
+	}
+
+	async function loadDraftEditorSchedules() {
+		if (!draftEditor) return;
+		draftEditorLoading = true;
+		try {
+			draftEditorSchedules = (await listDraftSchedules(draftEditor.id, draftEditorMonth, draftEditorYear)) || [];
+		} catch (err) {
+			globalError = err instanceof Error ? err.message : 'Gagal memuat jadwal draft';
+		} finally {
+			draftEditorLoading = false;
+		}
+	}
+
+	async function loadDraftEditorPeriods() {
+		if (!draftEditor) return;
+		try {
+			draftEditorPeriods = (await listDraftSchedulePeriods(draftEditor.id)) || [];
+		} catch {
+			// non-fatal
+		}
+	}
+
+	function draftEditorPeriodHasData(month: number, year: number) {
+		return draftEditorPeriods.some((p) => p.month === month && p.year === year);
+	}
+
+	function changeDraftEditorPeriod(month: number, year: number) {
+		draftEditorMonth = month;
+		draftEditorYear = year;
+		loadDraftEditorSchedules();
+	}
+
+	// --- Grid: rentang jam & warna per guru, sama seperti Jadwal Mengajar ---
+	const draftGridHourRange = $derived.by(() => {
+		let minHour = GRID_DEFAULT_MIN_HOUR;
+		let maxHour = GRID_DEFAULT_MAX_HOUR;
+		for (const s of draftEditorSchedules) {
+			const startH = Math.floor(timeToHourFloat(s.start_time));
+			const endH = Math.min(23, Math.ceil(timeToHourFloat(s.end_time)));
+			if (startH < minHour) minHour = startH;
+			if (endH > maxHour) maxHour = endH;
+		}
+		const hours: number[] = [];
+		for (let h = minHour; h < maxHour; h++) hours.push(h);
+		return hours;
+	});
+
+	// --- Form tambah/edit jadwal DI DALAM draft ---
+	let showModalDraftJadwal = $state(false);
+	let editDraftJadwalId = $state<number | null>(null); // null = mode tambah baru
+	let draftJadwalForm = $state({
+		teacher_id: 0,
+		room_id: 0,
+		day_of_week: 1,
+		period_month: now.getMonth() + 1,
+		period_year: now.getFullYear(),
+		start_time: '07:00',
+		end_time: '08:00',
+		target_jp: 1,
+		subject: ''
+	});
+	let draftJadwalFormError = $state('');
+
+	function openAddDraftJadwal() {
+		editDraftJadwalId = null;
+		draftJadwalForm = {
+			teacher_id: 0,
+			room_id: 0,
+			day_of_week: 1,
+			period_month: draftEditorMonth,
+			period_year: draftEditorYear,
+			start_time: '07:00',
+			end_time: '08:00',
+			target_jp: 1,
+			subject: ''
+		};
+		draftJadwalFormError = '';
+		showModalDraftJadwal = true;
+	}
+
+	function openEditDraftJadwal(s: DraftSchedule) {
+		editDraftJadwalId = s.id;
+		draftJadwalForm = {
+			teacher_id: s.teacher_id,
+			room_id: s.room_id,
+			day_of_week: s.day_of_week,
+			period_month: s.period_month,
+			period_year: s.period_year,
+			start_time: s.start_time ? s.start_time.slice(0, 5) : '07:00',
+			end_time: s.end_time ? s.end_time.slice(0, 5) : '08:00',
+			target_jp: s.target_jp,
+			subject: s.subject ?? ''
+		};
+		draftJadwalFormError = '';
+		showModalDraftJadwal = true;
+	}
+
+	async function handleSaveDraftJadwal(e: Event) {
+		e.preventDefault();
+		draftJadwalFormError = '';
+		if (!draftEditor) return;
+		if (!draftJadwalForm.teacher_id || !draftJadwalForm.room_id) {
+			draftJadwalFormError = 'Pilih guru dan ruangan terlebih dahulu';
+			return;
+		}
+		const payload = {
+			...draftJadwalForm,
+			start_time: draftJadwalForm.start_time + ':00',
+			end_time: draftJadwalForm.end_time + ':00'
+		};
+		try {
+			if (editDraftJadwalId === null) {
+				await createDraftSchedule(draftEditor.id, payload);
+			} else {
+				await updateDraftSchedule(draftEditor.id, editDraftJadwalId, payload);
+			}
+			showModalDraftJadwal = false;
+			await loadDraftEditorPeriods();
+			await loadDraftEditorSchedules();
+		} catch (err) {
+			draftJadwalFormError = err instanceof Error ? err.message : 'Gagal menyimpan jadwal draft';
+		}
+	}
+
+	async function handleDeleteDraftJadwal(s: DraftSchedule) {
+		if (!draftEditor) return;
+		if (!confirm(`Hapus jadwal "${s.teacher_name}" di "${s.room_name}" pada ${DAY_NAMES[s.day_of_week]} dari draft ini?`))
+			return;
+		try {
+			await deleteDraftSchedule(draftEditor.id, s.id);
+			await loadDraftEditorSchedules();
+		} catch (err) {
+			globalError = err instanceof Error ? err.message : 'Gagal menghapus jadwal draft';
 		}
 	}
 
@@ -2977,7 +3178,7 @@
 	</div>
 {/if}
 
-<!-- ================= MODAL PENGATURAN (⚙️ Tahun Ajaran + Identitas Sekolah) ================= -->
+<!-- ================= MODAL PENGATURAN (⚙️ Draft Jadwal + Identitas Sekolah) ================= -->
 {#if showModalSettings}
 	<div class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex justify-center items-center p-4 z-50">
 		<div class="bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden border border-slate-200 max-h-[90vh] flex flex-col">
@@ -2991,9 +3192,9 @@
 					class="flex-1 py-3 text-sm font-bold border-0 cursor-pointer transition {settingsTab === 'branding' ? 'text-blue-900 border-b-2 border-blue-900 bg-blue-50' : 'text-slate-400 bg-white hover:bg-slate-50'}">
 					🏫 Identitas Sekolah
 				</button>
-				<button type="button" onclick={() => (settingsTab = 'tahun-ajaran')}
-					class="flex-1 py-3 text-sm font-bold border-0 cursor-pointer transition {settingsTab === 'tahun-ajaran' ? 'text-blue-900 border-b-2 border-blue-900 bg-blue-50' : 'text-slate-400 bg-white hover:bg-slate-50'}">
-					📅 Tahun Ajaran
+				<button type="button" onclick={() => (settingsTab = 'draft-jadwal')}
+					class="flex-1 py-3 text-sm font-bold border-0 cursor-pointer transition {settingsTab === 'draft-jadwal' ? 'text-blue-900 border-b-2 border-blue-900 bg-blue-50' : 'text-slate-400 bg-white hover:bg-slate-50'}">
+					📋 Draft Jadwal
 				</button>
 			</div>
 
@@ -3061,52 +3262,57 @@
 				{:else}
 					<div class="space-y-4">
 						<p class="text-xs text-slate-500">
-							Hanya <b>1</b> tahun ajaran yang aktif dalam satu waktu. Buat draft tahun ajaran depan lebih dulu, tinggal aktifkan kapan saja waktunya tiba — tahun ajaran lain tetap tersimpan sebagai draft (tidak hilang, tidak bisa dipakai sampai diaktifkan lagi).
+							Draft berisi susunan jadwal sungguhan yang diedit terpisah dari jadwal yang sedang berlaku. Klik nama draft untuk mengisi jadwalnya (masih kosong sampai diisi). Hanya <b>1</b> draft yang boleh aktif dalam satu waktu — mengaktifkan sebuah draft menyalin isinya ke jadwal live pada periode terkait; menonaktifkannya mengosongkan lagi periode itu.
 						</p>
 
-						{#if academicYearError}
-							<div class="bg-rose-50 border border-rose-200 text-rose-700 p-2.5 rounded-lg text-xs font-semibold">{academicYearError}</div>
+						{#if draftError}
+							<div class="bg-rose-50 border border-rose-200 text-rose-700 p-2.5 rounded-lg text-xs font-semibold">{draftError}</div>
 						{/if}
 
 						<div class="flex items-end gap-2 bg-slate-50 border border-slate-200 rounded-lg p-3">
 							<div class="flex-1">
-								<label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Buat Draft Tahun Ajaran Baru</label>
-								<div class="flex items-center gap-1.5">
-									<input type="number" bind:value={newAcademicYearStart} class="w-24 border border-slate-300 rounded-lg p-2 text-sm" />
-									<span class="text-slate-400 text-sm">/ {newAcademicYearStart + 1}</span>
-								</div>
+								<label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Buat Draft Baru</label>
+								<input type="text" bind:value={newDraftName} placeholder="Contoh: 2026/2027 V1"
+									class="w-full border border-slate-300 rounded-lg p-2 text-sm focus:ring-2 focus:ring-blue-800 focus:outline-none" />
 							</div>
-							<button type="button" onclick={handleAddAcademicYear}
+							<button type="button" onclick={handleAddDraft}
 								class="bg-blue-900 text-white px-3.5 py-2 rounded-lg text-xs font-bold border-0 cursor-pointer hover:bg-blue-950">
 								+ Tambah Draft
 							</button>
 						</div>
 
-						{#if academicYearsLoading}
+						{#if draftsLoading}
 							<p class="text-sm text-slate-400">Memuat...</p>
-						{:else if academicYears.length === 0}
-							<p class="text-sm text-slate-400">Belum ada tahun ajaran. Tambahkan dulu di atas.</p>
+						{:else if drafts.length === 0}
+							<p class="text-sm text-slate-400">Belum ada draft. Tambahkan dulu di atas.</p>
 						{:else}
 							<div class="divide-y divide-slate-100 border border-slate-200 rounded-lg overflow-hidden">
-								{#each academicYears as y}
-									<div class="flex items-center justify-between px-4 py-3 {y.is_active ? 'bg-emerald-50' : 'bg-white'}">
-										<div class="flex items-center gap-2">
-											<span class="font-bold text-slate-800">{y.label}</span>
-											{#if y.is_active}
+								{#each drafts as d (d.id)}
+									<div class="flex items-center justify-between px-4 py-3 {d.is_active ? 'bg-emerald-50' : 'bg-white'}">
+										<button type="button" onclick={() => openDraftEditor(d)}
+											class="flex items-center gap-2 bg-transparent border-0 cursor-pointer p-0 text-left hover:underline">
+											<span class="font-bold text-slate-800">{d.name}</span>
+											<span class="text-[11px] text-slate-400 font-normal">({d.schedule_count} jadwal)</span>
+											{#if d.is_active}
 												<span class="inline-flex items-center gap-1 bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full text-[10px] font-bold">
 													<span class="w-1.5 h-1.5 rounded-full bg-emerald-600"></span> Aktif
 												</span>
 											{:else}
 												<span class="bg-slate-200 text-slate-500 px-2 py-0.5 rounded-full text-[10px] font-bold">Draft</span>
 											{/if}
-										</div>
-										<div class="flex gap-2">
-											{#if !y.is_active}
-												<button type="button" onclick={() => handleActivateAcademicYear(y)}
-													class="bg-emerald-100 text-emerald-700 px-3 py-1 rounded text-xs font-bold border-0 cursor-pointer hover:bg-emerald-200">
+										</button>
+										<div class="flex gap-2 flex-shrink-0">
+											{#if d.is_active}
+												<button type="button" disabled={draftActionLoading === d.id} onclick={() => handleDeactivateDraft(d)}
+													class="bg-amber-100 text-amber-700 px-3 py-1 rounded text-xs font-bold border-0 cursor-pointer hover:bg-amber-200 disabled:opacity-50">
+													⛔ Nonaktifkan
+												</button>
+											{:else}
+												<button type="button" disabled={draftActionLoading === d.id} onclick={() => handleActivateDraft(d)}
+													class="bg-emerald-100 text-emerald-700 px-3 py-1 rounded text-xs font-bold border-0 cursor-pointer hover:bg-emerald-200 disabled:opacity-50">
 													✅ Aktifkan
 												</button>
-												<button type="button" onclick={() => handleDeleteAcademicYear(y)}
+												<button type="button" onclick={() => handleDeleteDraft(d)}
 													class="bg-rose-100 text-rose-700 px-3 py-1 rounded text-xs font-bold border-0 cursor-pointer hover:bg-rose-200">
 													🗑️
 												</button>
@@ -3119,6 +3325,197 @@
 					</div>
 				{/if}
 			</div>
+		</div>
+	</div>
+{/if}
+
+<!-- ================= EDITOR DRAFT JADWAL (grid, terpisah dari jadwal live) ================= -->
+{#if showDraftEditor && draftEditor}
+	<div class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex justify-center items-center p-4 z-50">
+		<div class="bg-white rounded-xl shadow-2xl w-full max-w-4xl overflow-hidden border border-slate-200 max-h-[90vh] flex flex-col">
+			<div class="bg-blue-900 px-6 py-4 text-white flex justify-between items-center flex-shrink-0">
+				<div>
+					<h3 class="font-bold text-base">📋 Draft: {draftEditor.name}</h3>
+					<p class="text-[11px] text-blue-200">Jadwal di sini terpisah dari jadwal live — aman diedit sampai draft ini diaktifkan.</p>
+				</div>
+				<button type="button" onclick={closeDraftEditor} class="text-blue-200 hover:text-white border-0 bg-transparent text-xl font-bold cursor-pointer">✕</button>
+			</div>
+
+			<div class="p-6 overflow-y-auto">
+				<div class="flex flex-wrap justify-between items-center gap-3 mb-4">
+					<div class="flex items-center gap-2">
+						<button type="button" onclick={() => changeDraftEditorPeriod(draftEditorMonth === 1 ? 12 : draftEditorMonth - 1, draftEditorMonth === 1 ? draftEditorYear - 1 : draftEditorYear)}
+							class="w-8 h-8 bg-slate-100 text-slate-600 rounded-lg border-0 cursor-pointer hover:bg-slate-200 font-bold">‹</button>
+						<span class="font-bold text-slate-800 min-w-[140px] text-center">
+							{monthName(draftEditorMonth)} {draftEditorYear}
+							{#if draftEditorPeriodHasData(draftEditorMonth, draftEditorYear)}
+								<span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 ml-1"></span>
+							{/if}
+						</span>
+						<button type="button" onclick={() => changeDraftEditorPeriod(draftEditorMonth === 12 ? 1 : draftEditorMonth + 1, draftEditorMonth === 12 ? draftEditorYear + 1 : draftEditorYear)}
+							class="w-8 h-8 bg-slate-100 text-slate-600 rounded-lg border-0 cursor-pointer hover:bg-slate-200 font-bold">›</button>
+					</div>
+					<button type="button" onclick={openAddDraftJadwal}
+						class="bg-slate-800 text-white px-4 py-2 rounded-lg text-sm font-semibold cursor-pointer border-0 hover:bg-slate-900 transition flex items-center gap-1.5 shadow-sm">
+						<span>+</span> Tambah Jadwal
+					</button>
+				</div>
+
+				{#if draftEditorLoading}
+					<p class="text-sm text-slate-400">Memuat...</p>
+				{:else if draftEditorSchedules.length === 0}
+					<p class="text-sm text-slate-400">Belum ada jadwal di draft ini untuk periode {monthName(draftEditorMonth)} {draftEditorYear}. Klik "+ Tambah Jadwal" untuk mengisinya.</p>
+				{:else}
+					<div class="overflow-x-auto pb-2">
+						<div
+							class="grid text-xs border border-slate-200 rounded-lg overflow-hidden min-w-[760px]"
+							style="grid-template-columns: 64px repeat(7, minmax(104px, 1fr)); grid-template-rows: 36px repeat({draftGridHourRange.length}, 52px);"
+						>
+							<div class="bg-slate-100 border-b border-r border-slate-200 flex items-center justify-center font-bold text-slate-500" style="grid-row:1; grid-column:1;">Jam</div>
+							{#each DAY_NAMES.slice(1) as dayName, dayIdx}
+								<div class="bg-slate-100 border-b border-r border-slate-200 last:border-r-0 flex items-center justify-center font-bold text-slate-600" style="grid-row:1; grid-column:{dayIdx + 2};">
+									{dayName}
+								</div>
+							{/each}
+
+							{#each draftGridHourRange as hour, rowIdx}
+								<div class="border-b border-r border-slate-200 flex items-start justify-center pt-1 font-bold text-slate-400 bg-slate-50/60" style="grid-row:{rowIdx + 2}; grid-column:1;">
+									{hour}
+								</div>
+								{#each Array(7) as _, dayIdx}
+									<div class="border-b border-r border-slate-100 last:border-r-0" style="grid-row:{rowIdx + 2}; grid-column:{dayIdx + 2};"></div>
+								{/each}
+							{/each}
+
+							{#each draftEditorSchedules as s (s.id)}
+								{@const startH = Math.floor(timeToHourFloat(s.start_time))}
+								{@const endH = Math.max(startH + 1, Math.ceil(timeToHourFloat(s.end_time)))}
+								{@const rowIdx = draftGridHourRange.indexOf(startH)}
+								{@const rowSpan = Math.min(endH, draftGridHourRange[draftGridHourRange.length - 1] + 1) - startH}
+								{@const color = teacherColor(s.teacher_id)}
+								{#if rowIdx >= 0}
+									<button
+										type="button"
+										onclick={() => openEditDraftJadwal(s)}
+										title="{s.room_name} - {s.subject || '-'} - {s.teacher_name} ({s.start_time}-{s.end_time}, {s.target_jp} JP)"
+										class="{color.bg} text-white rounded-md m-0.5 p-1.5 text-left text-[10px] leading-tight overflow-hidden cursor-pointer hover:opacity-90 transition border-0 flex flex-col"
+										style="grid-row: {rowIdx + 2} / span {rowSpan}; grid-column: {s.day_of_week + 1};"
+									>
+										<span class="font-bold truncate">{s.room_name}</span>
+										<span class="truncate opacity-90">{s.subject || '-'}</span>
+										<span class="truncate opacity-90">{s.teacher_name}</span>
+									</button>
+								{/if}
+							{/each}
+						</div>
+					</div>
+				{/if}
+			</div>
+		</div>
+	</div>
+{/if}
+
+<!-- ================= MODAL TAMBAH/EDIT JADWAL DI DALAM DRAFT ================= -->
+{#if showModalDraftJadwal && draftEditor}
+	<div class="fixed inset-0 bg-slate-900/70 backdrop-blur-xs flex justify-center items-center p-4 z-[60]">
+		<div class="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden border border-slate-200">
+			<div class="bg-slate-800 px-6 py-4 text-white flex justify-between items-center">
+				<h3 class="font-bold text-base">{editDraftJadwalId === null ? 'Tambah' : 'Edit'} Jadwal Draft</h3>
+				<button type="button" onclick={() => (showModalDraftJadwal = false)} class="text-slate-300 hover:text-white border-0 bg-transparent text-xl font-bold cursor-pointer">✕</button>
+			</div>
+
+			<form onsubmit={handleSaveDraftJadwal} class="p-6 space-y-3">
+				{#if draftJadwalFormError}
+					<div class="bg-rose-50 border border-rose-200 text-rose-700 p-2.5 rounded-lg text-xs font-semibold">{draftJadwalFormError}</div>
+				{/if}
+
+				<div>
+					<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Guru</label>
+					<select bind:value={draftJadwalForm.teacher_id} required class="w-full border border-slate-300 rounded-lg p-2.5 text-sm">
+						<option value={0} disabled>Pilih guru...</option>
+						{#each teachers.filter((t) => t.role === 'guru') as t}
+							<option value={t.id}>{t.name}</option>
+						{/each}
+					</select>
+				</div>
+
+				<div>
+					<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Ruangan</label>
+					<select bind:value={draftJadwalForm.room_id} required class="w-full border border-slate-300 rounded-lg p-2.5 text-sm">
+						<option value={0} disabled>Pilih ruangan...</option>
+						{#each rooms as r}
+							<option value={r.id}>{r.name}</option>
+						{/each}
+					</select>
+				</div>
+
+				<div>
+					<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Mata Pelajaran</label>
+					<input type="text" bind:value={draftJadwalForm.subject} placeholder="Contoh: Matematika"
+						class="w-full border border-slate-300 rounded-lg p-2.5 text-sm" />
+				</div>
+
+				<div class="grid grid-cols-2 gap-3">
+					<div>
+						<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Hari</label>
+						<select bind:value={draftJadwalForm.day_of_week} class="w-full border border-slate-300 rounded-lg p-2.5 text-sm">
+							{#each DAY_NAMES.slice(1) as dayName, idx}
+								<option value={idx + 1}>{dayName}</option>
+							{/each}
+						</select>
+					</div>
+					<div>
+						<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Target JP</label>
+						<input type="number" min="1" bind:value={draftJadwalForm.target_jp} class="w-full border border-slate-300 rounded-lg p-2.5 text-sm" />
+					</div>
+				</div>
+
+				<div class="grid grid-cols-2 gap-3">
+					<div>
+						<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Jam Mulai</label>
+						<input type="time" bind:value={draftJadwalForm.start_time} class="w-full border border-slate-300 rounded-lg p-2.5 text-sm" />
+					</div>
+					<div>
+						<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Jam Selesai</label>
+						<input type="time" bind:value={draftJadwalForm.end_time} class="w-full border border-slate-300 rounded-lg p-2.5 text-sm" />
+					</div>
+				</div>
+
+				<div class="grid grid-cols-2 gap-3">
+					<div>
+						<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Bulan</label>
+						<select bind:value={draftJadwalForm.period_month} class="w-full border border-slate-300 rounded-lg p-2.5 text-sm">
+							{#each MONTH_ABBR as abbr, idx}
+								<option value={idx + 1}>{abbr}</option>
+							{/each}
+						</select>
+					</div>
+					<div>
+						<label class="block text-xs font-bold text-slate-600 uppercase mb-1">Tahun</label>
+						<input type="number" bind:value={draftJadwalForm.period_year} class="w-full border border-slate-300 rounded-lg p-2.5 text-sm" />
+					</div>
+				</div>
+
+				<div class="flex justify-between items-center gap-2 pt-3 border-t border-slate-100">
+					{#if editDraftJadwalId !== null}
+						<button type="button"
+							onclick={() => {
+								const s = draftEditorSchedules.find((x) => x.id === editDraftJadwalId);
+								showModalDraftJadwal = false;
+								if (s) handleDeleteDraftJadwal(s);
+							}}
+							class="px-3 py-2 bg-rose-100 text-rose-700 rounded-lg text-xs font-bold border-0 cursor-pointer hover:bg-rose-200">
+							🗑️ Hapus
+						</button>
+					{:else}
+						<span></span>
+					{/if}
+					<div class="flex gap-2">
+						<button type="button" onclick={() => (showModalDraftJadwal = false)} class="px-4 py-2 bg-slate-100 text-slate-600 rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-slate-200">Batal</button>
+						<button type="submit" class="px-4 py-2 bg-blue-900 text-white rounded-lg text-sm font-semibold border-0 cursor-pointer hover:bg-blue-950">Simpan</button>
+					</div>
+				</div>
+			</form>
 		</div>
 	</div>
 {/if}
